@@ -1,0 +1,23 @@
+[package]
+name = "aur-guard"
+version = "0.1.0"
+edition = "2021"
+description = "Analizador de seguridad para PKGBUILDs del AUR. Detecta patrones maliciosos antes de ejecutar makepkg."
+license = "MIT"
+rust-version = "1.80"
+
+[[bin]]
+name = "aur-guard"
+path = "src/main.rs"
+
+[dependencies]
+regex = "1.10"
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

