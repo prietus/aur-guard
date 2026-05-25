@@ -63,6 +63,100 @@ yay -S some-aur-package
 # → if clean, it execs the real makepkg
 ```
 
+## Integration with AUR helpers
+
+aur-guard plugs into AUR helpers (paru, yay, pikaur, trizen, aurutils, …)
+**through PATH order**, without touching the helper's configuration. There is
+nothing to register, no plugin to install — only one assumption: that
+`/usr/local/bin` sits before `/usr/bin` in your PATH.
+
+### Why the PATH trick works
+
+On a default Arch user account the PATH looks like:
+
+```
+/usr/local/sbin:/usr/local/bin:/usr/bin
+```
+
+Every AUR helper invokes `makepkg` by name, letting the shell resolve it
+through PATH. With `/usr/local/bin` first, the binary the helper finds is the
+aur-guard shim. The shim scans the `PKGBUILD` in the current working directory
+and, if the user accepts (or there are no findings), `exec`s the real
+`/usr/bin/makepkg` with the original arguments. The helper sees the exit code
+of the real makepkg and behaves exactly as it would have without the shim.
+
+### Verify it is wired up
+
+```bash
+which makepkg
+# expected: /usr/local/bin/makepkg
+```
+
+If you instead see `/usr/bin/makepkg`, something (a shell rc file, an entry in
+`/etc/profile.d/`, a custom systemd user unit) is putting `/usr/bin` before
+`/usr/local/bin`. Fix the PATH or use one of the explicit integrations below.
+
+### Helper-by-helper status
+
+| Helper | Default behaviour | Notes |
+|---|---|---|
+| **paru** | Works out of the box | The config key `[bin] Makepkg = "makepkg"` is the default and resolves via PATH. If you previously set it to an absolute path (`/usr/bin/makepkg`) in `~/.config/paru/paru.conf` or `/etc/paru.conf`, change it back to `"makepkg"` or point it at `"/usr/local/bin/makepkg"`. |
+| **yay** | Works out of the box | Same situation: `MakepkgBin` defaults to `makepkg`. Check it with `yay -P --getconfig \| grep -i makepkg`. If you ran `yay --save --makepkg /usr/bin/makepkg` at some point, undo it with `yay --save --makepkg makepkg`. |
+| **pikaur** | Works out of the box | Resolves `makepkg` through PATH. |
+| **trizen** | Works out of the box | Same. |
+| **aurutils** (`aur build`) | Works out of the box | Same. |
+| **paru `--chroot`** or **yay `--chroot`** | **Does not see the shim** | These build inside a clean systemd-nspawn / `mkarchroot` container that has no `/usr/local/bin/makepkg`. The pacman PreTransaction hook still fires once the resulting `.pkg.tar.zst` is about to be installed, so the second layer of defence still applies. |
+| Manual `pacman -U some-package.pkg.tar.zst` | Hook only | The shim is bypassed entirely because makepkg is not invoked, but the pacman hook still audits the PKGBUILD if it is available in a known AUR-helper cache. |
+
+### Explicit integrations (if you do not want to rely on PATH)
+
+Both points below are optional. Use them if the PATH trick is not viable in
+your environment.
+
+**paru `PreBuildCommand`** — paru natively supports running a command before
+each build. In `~/.config/paru/paru.conf` (or `/etc/paru.conf`):
+
+```ini
+[bin]
+PreBuildCommand = /usr/local/bin/aur-guard check --threshold high .
+```
+
+`PreBuildCommand` is treated as a gate by paru: if it exits non-zero, paru
+aborts the build. Using `check --threshold high` is recommended in this slot
+because there is no interactive prompt — the exit code decides.
+
+**yay** does not expose a pre-build hook. With yay, stick to the PATH shim, or
+use the two-step flow:
+
+```bash
+yay -G some-aur-package           # only clone the package
+aur-guard scan some-aur-package/  # scan
+cd some-aur-package && makepkg -si
+```
+
+### Skipping the scan for a single command
+
+Sometimes you really do want to bypass the scan (you have already audited the
+PKGBUILD by hand, you are reinstalling a known-good package, …):
+
+```bash
+AUR_GUARD_DISABLE=1 yay -S some-aur-package
+```
+
+The shim detects the variable and `exec`s the real makepkg directly without
+scanning. The pacman hook is independent and will still run unless you also
+remove or disable `/etc/pacman.d/hooks/aur-guard.hook`.
+
+### Why both layers (shim + pacman hook)?
+
+The shim is the only checkpoint that runs **before** the PKGBUILD executes,
+so it is the only one that can prevent a `prepare()`/`build()` payload from
+doing damage. The pacman hook is downstream and only sees the already-built
+`.pkg.tar.zst`, but it covers cases the shim cannot: chroot builds, manual
+`pacman -U`, sudo PATH issues, and corrupted helper configs. The two layers
+together mean a malicious PKGBUILD has to slip past both PATH resolution and
+the post-build audit.
+
 ## Environment variables
 
 | Variable | Effect |
