@@ -2,7 +2,7 @@
 name = "aur-guard"
 version = "0.1.0"
 edition = "2021"
-description = "Analizador de seguridad para PKGBUILDs del AUR. Detecta patrones maliciosos antes de ejecutar makepkg."
+description = "Security scanner for AUR PKGBUILDs. Detects malicious patterns before makepkg runs the build."
 license = "MIT"
 rust-version = "1.80"
 

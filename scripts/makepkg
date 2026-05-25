@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Shim de makepkg que pasa por aur-guard antes de llamar al makepkg real.
+# makepkg shim that passes through aur-guard before calling the real makepkg.
 #
-# Instalación: colocar en /usr/local/bin/makepkg (con permisos 0755). /usr/local/bin
-# precede a /usr/bin en el PATH por defecto, por lo que paru, yay y los usuarios
-# que invoquen `makepkg` directamente pasarán por aquí.
+# Install: place at /usr/local/bin/makepkg (mode 0755). /usr/local/bin precedes
+# /usr/bin in the default PATH, so paru, yay and any user invoking `makepkg`
+# directly will go through this script.
 #
 # Variables:
-#   AUR_GUARD_BIN          binario aur-guard (por defecto /usr/local/bin/aur-guard)
-#   AUR_GUARD_REAL_MAKEPKG ruta al makepkg real (por defecto /usr/bin/makepkg)
-#   AUR_GUARD_DISABLE=1    saltarse el escaneo (no recomendado)
+#   AUR_GUARD_BIN          aur-guard binary (default /usr/local/bin/aur-guard)
+#   AUR_GUARD_REAL_MAKEPKG path to the real makepkg (default /usr/bin/makepkg)
+#   AUR_GUARD_DISABLE=1    skip the scan (not recommended)
 
 set -u
 
@@ -20,12 +20,12 @@ if [[ "${AUR_GUARD_DISABLE:-0}" == "1" ]]; then
 fi
 
 if [[ ! -x "$AUR_GUARD_BIN" ]]; then
-    printf 'aur-guard :: binario no encontrado en %s; saltando análisis.\n' "$AUR_GUARD_BIN" >&2
+    printf 'aur-guard :: binary not found at %s; skipping scan.\n' "$AUR_GUARD_BIN" >&2
     exec "$AUR_GUARD_REAL_MAKEPKG" "$@"
 fi
 
 if [[ ! -x "$AUR_GUARD_REAL_MAKEPKG" ]]; then
-    printf 'aur-guard :: makepkg real no encontrado en %s.\n' "$AUR_GUARD_REAL_MAKEPKG" >&2
+    printf 'aur-guard :: real makepkg not found at %s.\n' "$AUR_GUARD_REAL_MAKEPKG" >&2
     exit 127
 fi
 

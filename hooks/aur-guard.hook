@@ -1,9 +1,9 @@
-# Hook PreTransaction de pacman. Audita los PKGBUILDs de paquetes AUR (foreign)
-# justo antes de instalar/actualizar y permite abortar la transacción si hay
-# hallazgos de severidad alta o crítica.
+# pacman PreTransaction hook. Audits PKGBUILDs of AUR (foreign) packages
+# right before install/upgrade and lets the user abort the transaction if
+# there are high or critical findings.
 #
-# Instalación: copiar este archivo a /etc/pacman.d/hooks/aur-guard.hook
-# Necesita el binario aur-guard en PATH (típicamente /usr/local/bin/aur-guard).
+# Install: copy this file to /etc/pacman.d/hooks/aur-guard.hook
+# Requires the aur-guard binary in PATH (typically /usr/local/bin/aur-guard).
 
 [Trigger]
 Operation = Install
@@ -12,7 +12,7 @@ Type = Package
 Target = *
 
 [Action]
-Description = aur-guard :: auditando PKGBUILDs de paquetes AUR
+Description = aur-guard :: auditing PKGBUILDs of AUR packages
 When = PreTransaction
 Exec = /usr/local/bin/aur-guard pacman-hook
 NeedsTargets

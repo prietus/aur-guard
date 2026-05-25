@@ -21,12 +21,12 @@ pub fn print_result(result: &ScanResult, color: bool) {
     let green = if color { "\x1b[32m" } else { "" };
 
     eprintln!(
-        "{bold}aur-guard{reset} {dim}::{reset} {}  {dim}({} líneas){reset}",
+        "{bold}aur-guard{reset} {dim}::{reset} {}  {dim}({} lines){reset}",
         result.path, result.lines_scanned
     );
 
     if result.is_clean() {
-        eprintln!("  {green}✓ Sin hallazgos.{reset}");
+        eprintln!("  {green}✓ No findings.{reset}");
         return;
     }
 
@@ -35,7 +35,7 @@ pub fn print_result(result: &ScanResult, color: bool) {
     let med = result.count_by(Severity::Medium);
     let low = result.count_by(Severity::Low);
     eprintln!(
-        "  {} hallazgo(s):  crítica={crit}  alta={high}  media={med}  baja={low}",
+        "  {} finding(s):  critical={crit}  high={high}  medium={med}  low={low}",
         result.findings.len()
     );
     eprintln!();
@@ -48,25 +48,25 @@ pub fn print_result(result: &ScanResult, color: bool) {
             f.title,
             f.rule_id
         );
-        eprintln!("    {dim}línea {}:{reset} {}", f.line, f.snippet.trim());
+        eprintln!("    {dim}line {}:{reset} {}", f.line, f.snippet.trim());
         eprintln!("    {}", f.description);
         eprintln!();
     }
 }
 
-/// Pregunta interactiva por /dev/tty para que funcione aunque stdin/stdout vengan redirigidos
-/// (típico cuando nos invocan desde un hook de pacman o un wrapper de makepkg).
+/// Asks for confirmation over /dev/tty so the prompt works even when stdin/stdout
+/// are redirected (typical when invoked from a pacman hook or makepkg wrapper).
 pub fn confirm_continue(result: &ScanResult) -> bool {
     let crit = result.count_by(Severity::Critical);
     let high = result.count_by(Severity::High);
     let med = result.count_by(Severity::Medium);
 
     let prompt = format!(
-        "aur-guard :: {crit} crítica / {high} alta / {med} media. ¿Continuar con la instalación? [y/N] "
+        "aur-guard :: {crit} critical / {high} high / {med} medium. Continue with the install? [y/N] "
     );
 
-    // Intenta abrir /dev/tty para forzar diálogo con el usuario aunque pacman/makepkg
-    // tengan stdin/stdout capturados.
+    // Try opening /dev/tty so we can talk to the user even when pacman/makepkg
+    // have captured stdin/stdout.
     if let (Ok(mut tty_out), Ok(tty_in)) = (
         OpenOptions::new().write(true).open("/dev/tty"),
         OpenOptions::new().read(true).open("/dev/tty"),
@@ -80,7 +80,7 @@ pub fn confirm_continue(result: &ScanResult) -> bool {
         }
     }
 
-    // Fallback: stdin/stderr si /dev/tty no está disponible.
+    // Fallback: stdin/stderr if /dev/tty is not available.
     if std::io::stdin().is_terminal() {
         eprint!("{}", prompt);
         let _ = std::io::stderr().flush();
@@ -90,27 +90,27 @@ pub fn confirm_continue(result: &ScanResult) -> bool {
         }
     }
 
-    // Sin TTY: por defecto bloquear. Es lo seguro.
-    eprintln!("aur-guard :: sin TTY interactivo; bloqueando por defecto.");
+    // No TTY: block by default. Safe choice.
+    eprintln!("aur-guard :: no interactive TTY; blocking by default.");
     eprintln!(
-        "             Establezca AUR_GUARD_ASSUME=yes solo si está totalmente seguro de continuar."
+        "             Set AUR_GUARD_ASSUME=yes only if you are absolutely sure you want to continue."
     );
     matches!(
         std::env::var("AUR_GUARD_ASSUME").as_deref(),
-        Ok("yes" | "y" | "1" | "si" | "sí")
+        Ok("yes" | "y" | "1")
     )
 }
 
 fn is_yes(input: &str) -> bool {
     let t = input.trim().to_lowercase();
-    matches!(t.as_str(), "y" | "yes" | "s" | "si" | "sí")
+    matches!(t.as_str(), "y" | "yes")
 }
 
 pub fn append_log(path: &str, result: &ScanResult) {
     let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) else {
         return;
     };
-    let ts = chrono_like_now();
+    let ts = unix_timestamp();
     let _ = writeln!(
         f,
         "{ts} target={} lines={} findings={} crit={} high={} med={} low={}",
@@ -134,8 +134,8 @@ pub fn append_log(path: &str, result: &ScanResult) {
     }
 }
 
-// Pequeño helper para no añadir la dependencia `chrono` solo para un timestamp en el log.
-fn chrono_like_now() -> String {
+// Small helper so we don't pull in `chrono` just to print a log timestamp.
+fn unix_timestamp() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)

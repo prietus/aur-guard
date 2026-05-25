@@ -31,7 +31,7 @@ pub fn scan_text(content: &str, label: String) -> ScanResult {
 
     for (idx, line) in content.lines().enumerate() {
         lines_scanned += 1;
-        // No saltamos comentarios: un PKGBUILD comentado con un payload sigue siendo señal de alerta.
+        // We do not skip comment lines: a commented-out payload is still worth flagging.
         for rule in &rules {
             if let Some(m) = rule.regex.find(line) {
                 findings.push(Finding {
@@ -76,8 +76,8 @@ fn check_skip_checksums(content: &str) -> Vec<Finding> {
             out.push(Finding {
                 rule_id: "AG080",
                 severity: Severity::High,
-                title: "Todas las sumas de verificación son SKIP",
-                description: "El PKGBUILD desactiva la verificación de integridad de TODAS las fuentes. Cualquiera que comprometa el servidor de origen puede sustituir el contenido sin que makepkg lo detecte.",
+                title: "All checksums are SKIP",
+                description: "The PKGBUILD disables integrity verification for ALL sources. Anyone who compromises the upstream server can swap the content without makepkg noticing.",
                 line,
                 snippet: truncate(cap.get(0).unwrap().as_str().lines().next().unwrap_or(""), 240),
             });
@@ -102,8 +102,8 @@ fn check_source_array(content: &str) -> Vec<Finding> {
                 out.push(Finding {
                     rule_id: "AG081",
                     severity: Severity::Medium,
-                    title: "Fuente sobre canal sin cifrar (http/ftp)",
-                    description: "Una fuente HTTP/FTP plana puede ser sustituida por un intermediario. Use HTTPS o git+https. Si la fuente solo existe en HTTP, exija sha256/sha512 estricto.",
+                    title: "Source over an unencrypted channel (http/ftp)",
+                    description: "A plain HTTP/FTP source can be swapped by a network intermediary. Use HTTPS or git+https. If the source only exists over HTTP, demand a strict sha256/sha512 checksum.",
                     line,
                     snippet: truncate(url_part, 240),
                 });
@@ -112,8 +112,8 @@ fn check_source_array(content: &str) -> Vec<Finding> {
                 out.push(Finding {
                     rule_id: "AG082",
                     severity: Severity::Medium,
-                    title: "Repositorio git sobre HTTP sin cifrar",
-                    description: "git+http no autentica al servidor. Use git+https o git+ssh.",
+                    title: "git repository over unencrypted HTTP",
+                    description: "git+http does not authenticate the server. Use git+https or git+ssh.",
                     line,
                     snippet: truncate(url_part, 240),
                 });

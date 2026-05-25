@@ -1,10 +1,10 @@
-# Maintainer: Ejemplo <ejemplo@dominio.tld>
-pkgname=hola-mundo
+# Maintainer: Example <example@domain.tld>
+pkgname=hello-world
 pkgver=1.0.0
 pkgrel=1
-pkgdesc="Programa de ejemplo benigno"
+pkgdesc="Benign example program"
 arch=('x86_64')
-url="https://example.org/hola-mundo"
+url="https://example.org/hello-world"
 license=('MIT')
 depends=('glibc')
 makedepends=('gcc')

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Instalador de aur-guard.
+# Installer for aur-guard.
 #
-#   sudo ./install.sh             instala todo (binario, shim de makepkg, hook de pacman, log)
-#   sudo ./install.sh --no-hook   no instala el hook de pacman
-#   sudo ./install.sh --no-shim   no instala el shim de makepkg en /usr/local/bin
-#   sudo ./install.sh uninstall   elimina lo instalado por este script
+#   sudo ./install.sh             install everything (binary, makepkg shim, pacman hook, log)
+#   sudo ./install.sh --no-hook   do not install the pacman hook
+#   sudo ./install.sh --no-shim   do not install the makepkg shim in /usr/local/bin
+#   sudo ./install.sh uninstall   remove everything this script installs
 set -euo pipefail
 
 PREFIX="${PREFIX:-/usr/local}"
@@ -27,59 +27,59 @@ for arg in "$@"; do
             exit 0
             ;;
         *)
-            printf 'argumento desconocido: %s\n' "$arg" >&2
+            printf 'unknown argument: %s\n' "$arg" >&2
             exit 2
             ;;
     esac
 done
 
 if [[ "$EUID" -ne 0 ]]; then
-    printf 'aur-guard :: se necesita root (use sudo).\n' >&2
+    printf 'aur-guard :: root required (use sudo).\n' >&2
     exit 1
 fi
 
 if [[ "$mode" == "uninstall" ]]; then
     rm -fv "$BIN_DIR/aur-guard"
-    rm -fv "$BIN_DIR/makepkg"     # solo si era nuestro shim; el real vive en /usr/bin
+    rm -fv "$BIN_DIR/makepkg"     # only our shim; the real one lives in /usr/bin
     rm -fv "$HOOK_DIR/aur-guard.hook"
-    printf 'aur-guard :: desinstalado. Log preservado en %s\n' "$LOG_FILE"
+    printf 'aur-guard :: uninstalled. Log preserved at %s\n' "$LOG_FILE"
     exit 0
 fi
 
-# 1) compilar
+# 1) build
 if ! command -v cargo &>/dev/null; then
-    printf 'aur-guard :: cargo no está en PATH.\n' >&2
+    printf 'aur-guard :: cargo is not in PATH.\n' >&2
     exit 1
 fi
 ( cd "$SCRIPT_DIR" && cargo build --release --locked 2>/dev/null || cargo build --release )
 
 install -d "$BIN_DIR"
 install -m 0755 "$SCRIPT_DIR/target/release/aur-guard" "$BIN_DIR/aur-guard"
-printf 'aur-guard :: binario instalado en %s/aur-guard\n' "$BIN_DIR"
+printf 'aur-guard :: binary installed at %s/aur-guard\n' "$BIN_DIR"
 
-# 2) shim de makepkg
+# 2) makepkg shim
 if [[ "$want_shim" -eq 1 ]]; then
     if [[ -e "$BIN_DIR/makepkg" && ! -L "$BIN_DIR/makepkg" ]]; then
-        # respaldamos cualquier archivo previo
+        # back up any pre-existing file
         mv -v "$BIN_DIR/makepkg" "$BIN_DIR/makepkg.bak.$(date +%s)"
     fi
     install -m 0755 "$SCRIPT_DIR/scripts/makepkg" "$BIN_DIR/makepkg"
-    printf 'aur-guard :: shim de makepkg instalado en %s/makepkg\n' "$BIN_DIR"
-    printf '             (el makepkg real sigue en /usr/bin/makepkg)\n'
+    printf 'aur-guard :: makepkg shim installed at %s/makepkg\n' "$BIN_DIR"
+    printf '             (the real makepkg still lives at /usr/bin/makepkg)\n'
 fi
 
-# 3) hook de pacman
+# 3) pacman hook
 if [[ "$want_hook" -eq 1 ]]; then
     install -d "$HOOK_DIR"
     install -m 0644 "$SCRIPT_DIR/hooks/aur-guard.hook" "$HOOK_DIR/aur-guard.hook"
-    printf 'aur-guard :: hook PreTransaction instalado en %s/aur-guard.hook\n' "$HOOK_DIR"
+    printf 'aur-guard :: PreTransaction hook installed at %s/aur-guard.hook\n' "$HOOK_DIR"
 fi
 
 # 4) log
 touch "$LOG_FILE"
 chmod 0644 "$LOG_FILE"
-printf 'aur-guard :: log inicializado en %s\n' "$LOG_FILE"
+printf 'aur-guard :: log initialised at %s\n' "$LOG_FILE"
 
-printf '\naur-guard :: listo. Prueba:\n'
+printf '\naur-guard :: done. Try:\n'
 printf '  aur-guard rules\n'
-printf '  aur-guard scan %s/test-fixtures/PKGBUILD.malicioso\n' "$SCRIPT_DIR"
+printf '  aur-guard scan %s/test-fixtures/PKGBUILD.malicious\n' "$SCRIPT_DIR"

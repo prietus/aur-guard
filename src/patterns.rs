@@ -16,40 +16,40 @@ macro_rules! rule {
             severity: $sev,
             title: $title,
             description: $desc,
-            regex: Regex::new($re).expect(concat!("regex inválida en regla ", $id)),
+            regex: Regex::new($re).expect(concat!("invalid regex in rule ", $id)),
         }
     };
 }
 
 pub fn build_rules() -> Vec<Rule> {
     vec![
-        // --- Ejecución de contenido remoto ---
+        // --- Remote content execution ---
         rule!(
             "AG001",
             Severity::Critical,
-            "Descarga remota canalizada a un shell",
-            "curl/wget/fetch cuya salida se canaliza directamente a bash/sh/zsh/etc. El contenido descargado no se verifica y puede cambiar entre instalaciones.",
+            "Remote download piped into a shell",
+            "curl/wget/fetch output piped directly into bash/sh/zsh/etc. The downloaded content is unverified and can change between installs.",
             r"(?:curl|wget|fetch|aria2c)\s+[^\n|;&]*?\|\s*(?:sudo\s+)?(?:bash|sh|zsh|ksh|fish|dash|ash)\b"
         ),
         rule!(
             "AG002",
             Severity::Critical,
-            "Sustitución de proceso con descarga remota",
-            "Equivalente a 'curl | bash' pero usando bash <(curl ...). Ejecuta contenido remoto sin verificación.",
+            "Process substitution from remote download",
+            "Equivalent to 'curl | bash' via bash <(curl ...). Executes remote content without verification.",
             r"(?:bash|sh|zsh|ksh|source|\.)\s+<\(\s*(?:curl|wget|fetch)\s"
         ),
         rule!(
             "AG003",
             Severity::Critical,
-            "eval sobre descarga remota",
-            "eval ejecuta su argumento como código. Combinado con curl/wget descarga y ejecuta código no verificado.",
+            "eval over remote download",
+            "eval executes its argument as code. Combined with curl/wget it downloads and runs unverified code.",
             r#"eval\s+["`]?\$?\(\s*(?:curl|wget|fetch)\s"#
         ),
         rule!(
             "AG004",
             Severity::High,
-            "source/. desde URL remota",
-            "Cargar y ejecutar un script directamente desde la red sin descargarlo a la fuente del paquete.",
+            "source/. from a remote URL",
+            "Loads and runs a script directly from the network instead of declaring it in the source array.",
             r#"(?:^|\s)(?:source|\.)\s+["']?https?://"#
         ),
 
@@ -57,188 +57,188 @@ pub fn build_rules() -> Vec<Rule> {
         rule!(
             "AG010",
             Severity::Critical,
-            "Reverse shell con netcat (-e)",
-            "netcat con el flag -e ejecuta un programa en cada conexión; patrón clásico de reverse shell.",
+            "netcat reverse shell (-e)",
+            "netcat with -e executes a program on every connection; classic reverse shell pattern.",
             r"\bnc(?:at)?\s+(?:-[a-zA-Z]*e[a-zA-Z]*)\s+\S+\s+\d+"
         ),
         rule!(
             "AG011",
             Severity::Critical,
-            "Reverse shell con bash /dev/tcp",
-            "Patrón clásico de reverse shell usando el dispositivo virtual /dev/tcp de bash.",
+            "bash /dev/tcp reverse shell",
+            "Classic reverse shell using bash's virtual /dev/tcp device.",
             r"bash\s+-i\s+>&?\s*/dev/(?:tcp|udp)/"
         ),
         rule!(
             "AG012",
             Severity::High,
-            "Reverse shell en Python",
-            "Importación de socket+pty+subprocess típica de reverse shells en una sola línea.",
+            "Python reverse shell",
+            "socket + pty + subprocess one-liner typical of reverse shells.",
             r#"python[0-9.]*\s+-c\s+["'][^"']*\b(?:socket|pty)\b[^"']*\b(?:dup2|spawn|connect)\b"#
         ),
         rule!(
             "AG013",
             Severity::High,
-            "Reverse shell en Perl",
-            "Uso de Perl con socket+exec característico de reverse shells.",
+            "Perl reverse shell",
+            "Perl with socket + exec is characteristic of reverse shells.",
             r#"perl\s+-e\s+["'][^"']*\bsocket\b[^"']*\bexec\b"#
         ),
 
-        // --- Comandos destructivos ---
+        // --- Destructive commands ---
         rule!(
             "AG020",
             Severity::Critical,
-            "rm recursivo apuntando a la raíz del sistema",
-            "rm -rf en o cerca de /. Si se ejecuta como un usuario común aún puede destruir el HOME, y --no-preserve-root permite incluso destruir el sistema.",
+            "Recursive rm aimed at the system root",
+            "rm -rf at or near /. Even running as a normal user can wipe HOME, and --no-preserve-root can wipe the system itself.",
             r"\brm\s+(?:-[a-zA-Z]+\s+)*-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+(?:--no-preserve-root\s+)?(?:/(?:\s|\*|$)|~(?:\s|/|$)|\$HOME|\$ROOT)"
         ),
         rule!(
             "AG021",
             Severity::Critical,
-            "dd escribiendo a un dispositivo de bloque",
-            "dd con of=/dev/sd*, nvme*, vd*, hd* destruirá los datos del disco.",
+            "dd writing to a block device",
+            "dd with of=/dev/sd*, nvme*, vd*, hd* will destroy disk data.",
             r"\bdd\s+[^\n;&|]*\bof=/dev/(?:sd|nvme|hd|vd|mmcblk|loop|disk)"
         ),
         rule!(
             "AG022",
             Severity::Critical,
-            "Formato de sistema de archivos",
-            "mkfs/wipefs sobre un dispositivo. Destruye los datos existentes.",
+            "Filesystem format on a device",
+            "mkfs/wipefs on a device destroys existing data.",
             r"\b(?:mkfs(?:\.\w+)?|wipefs|shred)\s+[^\n;&|]*/dev/"
         ),
         rule!(
             "AG023",
             Severity::Critical,
             "Fork bomb",
-            "Construcción típica de fork bomb en bash que agota recursos del sistema.",
+            "Classic bash fork bomb construct that exhausts system resources.",
             r":\(\)\s*\{\s*:\s*\|\s*:?\s*&\s*\}\s*;\s*:"
         ),
 
-        // --- Persistencia / backdoor ---
+        // --- Persistence / backdoor ---
         rule!(
             "AG030",
             Severity::High,
-            "Escritura en authorized_keys o cuentas del sistema",
-            "Añadir claves SSH o modificar passwd/shadow/sudoers desde un PKGBUILD es una técnica de backdoor.",
+            "Writes to authorized_keys or system accounts",
+            "Adding SSH keys or modifying passwd/shadow/sudoers from a PKGBUILD is a backdoor technique.",
             r#"(?:>>?|tee\s+(?:-a\s+)?)\s*["']?(?:(?:~|\$HOME|/root|/home/[^/\s]+)/\.ssh/authorized_keys|/etc/(?:passwd|shadow|sudoers(?:\.d)?))"#
         ),
         rule!(
             "AG031",
             Severity::High,
-            "Modificación de archivos de inicio del shell",
-            "Modificar .bashrc, .zshrc, .profile, etc., desde build() establece persistencia en la sesión del usuario.",
+            "Modifies shell startup files",
+            "Touching .bashrc, .zshrc, .profile, etc. from build() establishes persistence in the user's session.",
             r#"(?:>>?|tee\s+(?:-a\s+)?)\s*["']?(?:~|\$HOME|/root|/home/[^/\s]+)/\.(?:bashrc|bash_profile|bash_login|zshrc|zshenv|zprofile|profile|xprofile|xinitrc)"#
         ),
         rule!(
             "AG032",
             Severity::High,
-            "Manipulación de crontab",
-            "Añadir entradas al crontab o a /etc/cron* es un mecanismo común de persistencia.",
+            "crontab manipulation",
+            "Adding entries to crontab or /etc/cron* is a common persistence mechanism.",
             r"(?:\bcrontab\s+-?[el]?\b|\|\s*crontab\b|>\s*/(?:etc|var/spool)/cron)"
         ),
         rule!(
             "AG033",
             Severity::High,
-            "Activación de servicios systemd en build",
-            "systemctl enable/start dentro de un PKGBUILD activa servicios sin consentimiento. Esto debe ir en un .install scriptlet.",
+            "systemd unit enabled during build",
+            "systemctl enable/start inside a PKGBUILD activates services without consent. This belongs in a .install scriptlet.",
             r"\bsystemctl\s+(?:--user\s+)?(?:enable|start|restart|--now)\b"
         ),
         rule!(
             "AG034",
             Severity::High,
-            "Adición de usuarios o grupos en build",
-            "useradd/groupadd/usermod fuera de un scriptlet .install puede crear cuentas privilegiadas a espaldas del usuario.",
+            "User/group added during build",
+            "useradd/groupadd/usermod outside an .install scriptlet may create privileged accounts behind the user's back.",
             r"\b(?:useradd|groupadd|usermod|gpasswd)\b"
         ),
 
-        // --- Escalada de privilegios ---
+        // --- Privilege escalation ---
         rule!(
             "AG040",
             Severity::High,
-            "sudo dentro del PKGBUILD",
-            "makepkg rehúsa ejecutarse como root, por lo que un sudo dentro del PKGBUILD intenta obtener privilegios durante la compilación.",
+            "sudo inside the PKGBUILD",
+            "makepkg refuses to run as root, so sudo inside a PKGBUILD is an attempt to gain privilege during build.",
             r"(?m)^[^#\n]*\bsudo\s+\S"
         ),
         rule!(
             "AG041",
             Severity::High,
-            "Establece bit SUID/SGID",
-            "chmod con modo numérico 4xxx/2xxx o +s permite ejecución con privilegios del propietario del archivo.",
+            "Sets SUID/SGID bit",
+            "chmod with numeric mode 4xxx/2xxx or +s allows execution with the file owner's privileges.",
             r"\bchmod\s+(?:-[a-zA-Z]+\s+)*(?:[2467]\d{3}|[ugo]?\+s|u\+xs|g\+xs)\b"
         ),
         rule!(
             "AG042",
             Severity::High,
-            "Capabilities concedidas a un binario",
-            "setcap puede otorgar capacidades elevadas (cap_net_admin, cap_sys_admin, etc.) a binarios del paquete.",
+            "Capabilities granted to a binary",
+            "setcap can grant elevated capabilities (cap_net_admin, cap_sys_admin, etc.) to packaged binaries.",
             r"\bsetcap\s+(?:cap_|all=)"
         ),
 
-        // --- Ofuscación ---
+        // --- Obfuscation ---
         rule!(
             "AG050",
             Severity::High,
-            "Payload base64 decodificado y ejecutado",
-            "base64 -d canalizado a bash/sh/eval suele ocultar payloads.",
+            "base64 payload decoded and executed",
+            "base64 -d piped to bash/sh/eval typically hides payloads.",
             r"\b(?:base64\s+(?:-d|--decode)|openssl\s+(?:enc\s+)?-base64\s+-d)\b[^\n;&|]*\|\s*(?:bash|sh|zsh|eval)"
         ),
         rule!(
             "AG051",
             Severity::High,
-            "Payload hexadecimal decodificado y ejecutado",
-            "xxd -r o printf con escapes \\x canalizados a un shell ocultan payloads.",
+            "Hex payload decoded and executed",
+            "xxd -r or printf with \\x escapes piped to a shell hides payloads.",
             r#"\b(?:xxd\s+-r|printf\s+["'][^"']*(?:\\x[0-9a-fA-F]{2}){4,})[^\n;&|]*\|\s*(?:bash|sh|zsh)"#
         ),
         rule!(
             "AG052",
             Severity::Medium,
-            "Función bash con cuerpo en base64",
-            "Variable con cadena base64 grande y eval/decodificación adyacente es patrón típico de ofuscación.",
+            "Variable holding a large base64 blob",
+            "A variable assigned a long base64 string near an eval/decode call is a typical obfuscation pattern.",
             r#"=\s*["'][A-Za-z0-9+/]{120,}={0,2}["']"#
         ),
 
-        // --- Red ---
+        // --- Network ---
         rule!(
             "AG060",
             Severity::Medium,
-            "Conexión a IP literal",
-            "Descargas o conexiones a direcciones IP en lugar de a un dominio. Inusual y dificulta auditoría.",
+            "Connection to a literal IP",
+            "Downloads or connections to raw IP addresses instead of domains. Unusual and harder to audit.",
             r"(?:curl|wget|nc|ncat|ssh|scp)\s+[^\n;&|]*\b(?:https?://|//)?(?:\d{1,3}\.){3}\d{1,3}\b"
         ),
         rule!(
             "AG061",
             Severity::Medium,
-            "Acortador de URL como fuente",
-            "Los acortadores ocultan el destino real y son extraordinariamente inusuales en PKGBUILDs honestos.",
+            "URL shortener as a source",
+            "Shorteners hide the real destination and are extremely unusual in honest PKGBUILDs.",
             r"https?://(?:bit\.ly|tinyurl\.com|goo\.gl|t\.co|ow\.ly|is\.gd|buff\.ly|adf\.ly|cutt\.ly|rebrand\.ly)/"
         ),
         rule!(
             "AG062",
             Severity::Medium,
-            "Tunelización (Cloudflare/ngrok/serveo)",
-            "Servicios de túnel inverso para exponer servicios. Inesperado en una build de paquete.",
+            "Tunneling (Cloudflare/ngrok/serveo)",
+            "Reverse-tunnel services used to expose hosts. Not expected in a package build.",
             r"\b(?:ngrok|cloudflared|serveo\.net|localhost\.run|pinggy\.io|loophole\.cloud)\b"
         ),
 
-        // --- Filtración de datos ---
+        // --- Data exfiltration ---
         rule!(
             "AG070",
             Severity::High,
-            "Lectura de claves SSH del usuario",
-            "Acceder a claves privadas del usuario (~/.ssh/id_*) desde un PKGBUILD no tiene justificación.",
+            "Reads user SSH keys",
+            "Accessing private keys (~/.ssh/id_*) from a PKGBUILD has no legitimate justification.",
             r"(?:~|\$HOME|/root|/home/[^/\s]+)/\.ssh/(?:id_(?:rsa|ed25519|ecdsa|dsa)|known_hosts)\b"
         ),
         rule!(
             "AG071",
             Severity::High,
-            "Lectura de carteras / contraseñas / tokens",
-            "Lectura de archivos de credenciales conocidos (wallets, gnome-keyring, navegadores, .env).",
+            "Reads wallets / credentials / tokens",
+            "Reads known credential files (wallets, gnome-keyring, browsers, .env).",
             r"(?:~|\$HOME|/root|/home/[^/\s]+)/(?:\.(?:bitcoin|electrum|ethereum|gnupg|aws|kube|docker|netrc|config/(?:google-chrome|chromium|BraveSoftware|Mozilla/firefox))|\.env)\b"
         ),
         rule!(
             "AG072",
             Severity::Medium,
-            "Filtración por curl POST a host externo",
-            "curl con --data/-d o -F apuntando a un host externo desde un PKGBUILD puede filtrar datos.",
+            "Exfiltration via curl POST to external host",
+            "curl with --data/-d or -F targeting an external host from a PKGBUILD can leak data.",
             r"curl\s+(?:-[a-zA-Z]+\s+)*(?:-X\s+POST|--data\b|-d\s|-F\s)\s*[^\n;&|]*https?://"
         ),
     ]

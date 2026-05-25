@@ -1,33 +1,32 @@
 # aur-guard
 
-Analizador de seguridad para PKGBUILDs del AUR. Detecta patrones maliciosos
-comunes (`curl … | bash`, reverse shells, escritura en `authorized_keys`,
-`sudo` dentro del PKGBUILD, bits suid, fork bombs, `dd` a `/dev/sd*`, checksums
-todos en `SKIP`, fuentes sobre HTTP plano, etc.) **antes** de que `makepkg`
-ejecute el script de build, y opcionalmente como segunda capa cuando pacman
-está a punto de instalar.
+Security scanner for AUR PKGBUILDs. Detects common malicious patterns
+(`curl … | bash`, reverse shells, writes to `authorized_keys`, `sudo` inside
+the PKGBUILD, suid bits, fork bombs, `dd` to `/dev/sd*`, all-`SKIP` checksums,
+sources over plain HTTP, etc.) **before** `makepkg` runs the build script, and
+optionally as a second layer right before pacman installs the package.
 
-> **Objetivo**: dar una red de seguridad ante PKGBUILDs comprometidos del AUR,
-> sin necesidad de leer cada PKGBUILD a mano. No reemplaza la revisión manual,
-> la complementa.
+> **Goal**: provide a safety net against compromised AUR PKGBUILDs without
+> having to read every PKGBUILD by hand. It does not replace manual review —
+> it complements it.
 
-## Defensa en profundidad
+## Defence in depth
 
-`aur-guard` instala dos puntos de control:
+`aur-guard` installs two checkpoints:
 
-1. **Shim de `makepkg`** (`/usr/local/bin/makepkg`) — se ejecuta *antes* del
-   `makepkg` real. Es el único momento útil para **bloquear** la ejecución del
-   PKGBUILD malicioso. Aplica también cuando paru, yay o cualquier AUR helper
-   llama a `makepkg`.
-2. **Hook PreTransaction de pacman** (`/etc/pacman.d/hooks/aur-guard.hook`) —
-   segunda capa. Audita los PKGBUILDs de paquetes AUR (foreign) localizándolos
-   en las cachés conocidas de los AUR helpers y permite abortar la transacción.
+1. **`makepkg` shim** (`/usr/local/bin/makepkg`) — runs *before* the real
+   `makepkg`. This is the only useful point at which a malicious PKGBUILD can
+   actually be **blocked**. It also fires when paru, yay or any AUR helper
+   invokes `makepkg`.
+2. **pacman PreTransaction hook** (`/etc/pacman.d/hooks/aur-guard.hook`) —
+   second layer. Audits the PKGBUILDs of foreign (AUR) packages by locating
+   them in the known AUR-helper caches, and lets you abort the transaction.
 
-Ambos puntos preguntan **confirmación interactiva** por `/dev/tty` cuando hay
-hallazgos de severidad alta o crítica. Si no hay terminal interactivo, bloquean
-por defecto (salvo `AUR_GUARD_ASSUME=yes`).
+Both checkpoints prompt for **interactive confirmation** over `/dev/tty` when
+there are high- or critical-severity findings. With no interactive terminal,
+they block by default (unless `AUR_GUARD_ASSUME=yes`).
 
-## Instalación
+## Install
 
 ```bash
 git clone <repo> aur-guard
@@ -35,93 +34,93 @@ cd aur-guard
 sudo ./install.sh
 ```
 
-`install.sh` compila el binario en release, lo coloca en `/usr/local/bin/`,
-instala el shim de `makepkg` y registra el hook de pacman. Opciones útiles:
+`install.sh` builds the release binary, places it in `/usr/local/bin/`,
+installs the `makepkg` shim and registers the pacman hook. Useful flags:
 
 ```
-sudo ./install.sh --no-hook    # solo el shim
-sudo ./install.sh --no-shim    # solo el hook
-sudo ./install.sh uninstall    # quita binario, shim y hook
+sudo ./install.sh --no-hook    # shim only
+sudo ./install.sh --no-shim    # hook only
+sudo ./install.sh uninstall    # remove binary, shim and hook
 ```
 
-## Uso
+## Usage
 
 ```bash
-aur-guard scan PKGBUILD             # analiza e imprime los hallazgos
-aur-guard scan /ruta/al/paquete/    # busca el PKGBUILD del directorio
-aur-guard check PKGBUILD            # mismo escaneo, exit 0 limpio / 2 con hallazgos
+aur-guard scan PKGBUILD             # scan and print findings
+aur-guard scan /path/to/package/    # finds PKGBUILD inside the directory
+aur-guard check PKGBUILD            # same scan; exit 0 if clean, 2 with findings
 aur-guard check --threshold critical PKGBUILD
-aur-guard rules                     # lista todas las reglas activas
+aur-guard rules                     # list every active rule
 ```
 
-Una vez instalado el shim, el flujo es transparente:
+Once the shim is installed the flow is transparent:
 
 ```bash
-yay -S algun-paquete-aur
-# → paru/yay clona y llama a makepkg
-# → el shim invoca aur-guard, que escanea el PKGBUILD
-# → si hay hallazgos altos/críticos, pregunta y aborta si dices que no
-# → si todo está limpio, exec al makepkg real
+yay -S some-aur-package
+# → paru/yay clones and calls makepkg
+# → the shim invokes aur-guard, which scans the PKGBUILD
+# → on high/critical findings it asks for confirmation and aborts on "no"
+# → if clean, it execs the real makepkg
 ```
 
-## Variables de entorno
+## Environment variables
 
-| Variable | Efecto |
+| Variable | Effect |
 |---|---|
-| `AUR_GUARD_DISABLE=1` | El shim de `makepkg` se salta el escaneo y llama directamente al makepkg real. |
-| `AUR_GUARD_ASSUME=yes` | Cuando no hay TTY interactivo, se asume "sí" en la confirmación. **No usar en cron ni scripts no atendidos.** |
-| `AUR_GUARD_REAL_MAKEPKG` | Ruta al `makepkg` real (por defecto `/usr/bin/makepkg`). |
-| `AUR_GUARD_BIN` | Ruta al binario `aur-guard` que usa el shim (por defecto `/usr/local/bin/aur-guard`). |
-| `AUR_GUARD_CACHE_DIRS` | Lista separada por `:` con cachés adicionales donde buscar PKGBUILDs (para el hook de pacman). |
-| `NO_COLOR=1` | Desactiva colores en la salida. |
+| `AUR_GUARD_DISABLE=1` | The `makepkg` shim skips the scan and calls the real makepkg directly. |
+| `AUR_GUARD_ASSUME=yes` | With no interactive TTY, assume "yes" at the prompt. **Do not use in cron or unattended scripts.** |
+| `AUR_GUARD_REAL_MAKEPKG` | Path to the real `makepkg` (default `/usr/bin/makepkg`). |
+| `AUR_GUARD_BIN` | Path to the `aur-guard` binary used by the shim (default `/usr/local/bin/aur-guard`). |
+| `AUR_GUARD_CACHE_DIRS` | Colon-separated list of extra directories where the pacman hook should look for PKGBUILDs. |
+| `NO_COLOR=1` | Disable coloured output. |
 
-## Reglas
+## Rules
 
-30 reglas agrupadas en familias. Ver `aur-guard rules` para la lista completa.
+30 rules grouped into families. Run `aur-guard rules` for the full list.
 
-| Familia | Cubre |
+| Family | Covers |
 |---|---|
-| AG001–AG004 | Ejecución de contenido remoto (`curl|bash`, `bash <(curl)`, `eval $(curl)`, `source URL`) |
+| AG001–AG004 | Remote content execution (`curl|bash`, `bash <(curl)`, `eval $(curl)`, `source URL`) |
 | AG010–AG013 | Reverse shells (nc -e, `/dev/tcp`, python, perl) |
-| AG020–AG023 | Comandos destructivos (`rm -rf /`, `dd` a disco, `mkfs`, fork bomb) |
-| AG030–AG034 | Persistencia (authorized_keys, .bashrc, crontab, systemd, useradd) |
-| AG040–AG042 | Escalada (sudo en PKGBUILD, suid, setcap) |
-| AG050–AG052 | Ofuscación (base64, xxd, cadenas base64 inmensas) |
-| AG060–AG062 | Red sospechosa (IPs literales, acortadores, túneles) |
-| AG070–AG072 | Acceso/filtración de credenciales y carteras |
-| AG080–AG082 | Metadatos del PKGBUILD (checksums SKIP, fuentes http/git+http) |
+| AG020–AG023 | Destructive commands (`rm -rf /`, `dd` to disk, `mkfs`, fork bomb) |
+| AG030–AG034 | Persistence (authorized_keys, .bashrc, crontab, systemd, useradd) |
+| AG040–AG042 | Privilege escalation (sudo in PKGBUILD, suid, setcap) |
+| AG050–AG052 | Obfuscation (base64, xxd, huge base64 strings) |
+| AG060–AG062 | Suspicious network (literal IPs, URL shorteners, tunnels) |
+| AG070–AG072 | Credential / wallet access and exfiltration |
+| AG080–AG082 | PKGBUILD metadata (SKIP checksums, http / git+http sources) |
 
-Las severidades son `CRÍTICA`, `ALTA`, `MEDIA`, `BAJA`. Por defecto el shim
-pide confirmación cuando hay al menos un hallazgo ≥ALTA.
+Severities are `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`. By default the shim asks
+for confirmation when at least one finding is ≥HIGH.
 
-## Limitaciones
+## Limitations
 
-- **No es un analizador estático completo de bash**. Las reglas son regex
-  cuidadosas: pueden tener falsos positivos en proyectos extraños y falsos
-  negativos si el atacante ofusca con suficiente esfuerzo. Es una red de
-  seguridad, no una garantía.
-- Un hook *puro* de pacman se ejecuta **después** de `makepkg`, así que solo
-  el shim puede prevenir la ejecución del PKGBUILD malicioso. El hook sirve
-  como auditoría y para abortar la instalación final.
-- Si un atacante reemplaza el PKGBUILD por algo aparentemente benigno y la
-  carga maliciosa vive en el tarball de fuentes (binario empaquetado, script
-  llamado desde `make install`, etc.), `aur-guard` no lo verá. Las reglas
-  AG080/AG081/AG082 al menos alertan cuando la integridad de las fuentes está
-  desactivada o sobre canal sin cifrar.
+- **Not a full bash static analyser**. The rules are carefully tuned regexes:
+  they may produce false positives in unusual projects and false negatives if
+  an attacker obfuscates with enough effort. This is a safety net, not a
+  guarantee.
+- A *pure* pacman hook runs **after** `makepkg`, so only the shim can prevent
+  the malicious PKGBUILD from executing. The hook serves as auditing and as a
+  way to abort the final install.
+- If an attacker replaces the PKGBUILD with something that looks benign and
+  ships the malicious payload inside the source tarball (a packaged binary, a
+  script called from `make install`, etc.), `aur-guard` will not see it. Rules
+  AG080/AG081/AG082 at least warn when source integrity is disabled or sent
+  over an unencrypted channel.
 
-## Añadir reglas
+## Adding rules
 
-Editar `src/patterns.rs`, añadir una entrada con `rule!(id, severidad, título,
-descripción, regex)`. Si el regex necesita matchear comillas, usar raw strings
-con almohadilla: `r#"…"#`, no `r"…"`.
+Edit `src/patterns.rs` and add a `rule!(id, severity, title, description,
+regex)` entry. If the regex needs to match quote characters, use hash raw
+strings (`r#"…"#`) rather than `r"…"`.
 
-Probar con:
+Test with:
 
 ```bash
 cargo build --release
-./target/release/aur-guard scan test-fixtures/PKGBUILD.malicioso
+./target/release/aur-guard scan test-fixtures/PKGBUILD.malicious
 ```
 
-## Licencia
+## License
 
-MIT — ver [`LICENSE`](LICENSE).
+MIT — see [`LICENSE`](LICENSE).

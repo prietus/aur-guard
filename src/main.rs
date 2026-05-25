@@ -18,10 +18,10 @@ const FALLBACK_LOG: &str = "/tmp/aur-guard.log";
 #[command(
     name = "aur-guard",
     version,
-    about = "Analizador de seguridad para PKGBUILDs del AUR.",
-    long_about = "aur-guard analiza un PKGBUILD en busca de patrones maliciosos comunes \
-                  (curl|bash, reverse shells, escritura en authorized_keys, sudo, suid, ...) \
-                  y bloquea con confirmación interactiva."
+    about = "Security scanner for AUR PKGBUILDs.",
+    long_about = "aur-guard scans a PKGBUILD for common malicious patterns \
+                  (curl|bash, reverse shells, writes to authorized_keys, sudo, \
+                  suid, ...) and blocks with interactive confirmation."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -30,37 +30,38 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Analiza un PKGBUILD (o cualquier archivo) e imprime los hallazgos.
+    /// Scan a PKGBUILD (or any file) and print findings.
     Scan {
-        /// Ruta al PKGBUILD. Si es un directorio, busca PKGBUILD dentro.
+        /// Path to the PKGBUILD. If it is a directory, looks for PKGBUILD inside.
         path: PathBuf,
-        /// Sin colores ni decoración.
+        /// No colors or decoration.
         #[arg(long)]
         plain: bool,
     },
-    /// Igual que `scan` pero el código de salida indica el resultado (0 limpio, 2 con hallazgos).
+    /// Same as `scan` but the exit code reflects the result (0 clean, 2 with findings).
     Check {
         path: PathBuf,
         #[arg(long)]
         plain: bool,
-        /// Severidad mínima a partir de la cual considerar fallo (low|medium|high|critical).
+        /// Minimum severity that triggers a non-zero exit (low|medium|high|critical).
         #[arg(long, default_value = "high")]
         threshold: String,
     },
-    /// Wrapper de makepkg: analiza el PKGBUILD del cwd y, si hay hallazgos, pide confirmación
-    /// interactiva. Si se acepta, hace exec del makepkg real con los argumentos pasados.
+    /// makepkg wrapper: scan the PKGBUILD in the cwd and, if there are findings,
+    /// ask for interactive confirmation. On accept, exec the real makepkg with the
+    /// given arguments.
     MakepkgWrap {
-        /// Ruta al binario real de makepkg.
+        /// Path to the real makepkg binary.
         #[arg(long, default_value = "/usr/bin/makepkg", env = "AUR_GUARD_REAL_MAKEPKG")]
         real: PathBuf,
-        /// Argumentos pasados a makepkg.
+        /// Arguments forwarded to makepkg.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Hook de pacman: lee paquetes objetivo por stdin (uno por línea), localiza el PKGBUILD
-    /// en cachés conocidas de AUR helpers y emite advertencia / bloqueo si hay hallazgos.
+    /// pacman hook: read target packages from stdin (one per line), locate the
+    /// PKGBUILD in known AUR-helper caches, and warn / block on findings.
     PacmanHook,
-    /// Lista todas las reglas de detección activas.
+    /// List every active detection rule.
     Rules,
 }
 
@@ -88,17 +89,17 @@ fn run(cli: Cli) -> Result<ExitCode> {
 fn resolve_pkgbuild(path: &Path) -> Result<PathBuf> {
     if path.is_dir() {
         let p = path.join("PKGBUILD");
-        anyhow::ensure!(p.exists(), "no encontré PKGBUILD en {}", path.display());
+        anyhow::ensure!(p.exists(), "no PKGBUILD found in {}", path.display());
         Ok(p)
     } else {
-        anyhow::ensure!(path.exists(), "no existe la ruta {}", path.display());
+        anyhow::ensure!(path.exists(), "path does not exist: {}", path.display());
         Ok(path.to_path_buf())
     }
 }
 
 fn cmd_scan(path: PathBuf, plain: bool) -> Result<ExitCode> {
     let path = resolve_pkgbuild(&path)?;
-    let result = scanner::scan_file(&path).with_context(|| format!("leyendo {}", path.display()))?;
+    let result = scanner::scan_file(&path).with_context(|| format!("reading {}", path.display()))?;
     let color = !plain && ui::use_color();
     ui::print_result(&result, color);
     Ok(if result.is_clean() {
@@ -110,11 +111,11 @@ fn cmd_scan(path: PathBuf, plain: bool) -> Result<ExitCode> {
 
 fn parse_threshold(s: &str) -> Result<Severity> {
     Ok(match s.to_lowercase().as_str() {
-        "low" | "baja" => Severity::Low,
-        "medium" | "med" | "media" => Severity::Medium,
-        "high" | "alta" => Severity::High,
-        "critical" | "crit" | "crítica" | "critica" => Severity::Critical,
-        other => anyhow::bail!("umbral desconocido: {other}"),
+        "low" => Severity::Low,
+        "medium" | "med" => Severity::Medium,
+        "high" => Severity::High,
+        "critical" | "crit" => Severity::Critical,
+        other => anyhow::bail!("unknown threshold: {other}"),
     })
 }
 
@@ -135,7 +136,7 @@ fn cmd_makepkg_wrap(real: PathBuf, args: Vec<String>) -> Result<ExitCode> {
     let cwd = std::env::current_dir()?;
     let pkgbuild = cwd.join("PKGBUILD");
 
-    // Si no hay PKGBUILD aquí (p.ej. `makepkg --version`), pasa directo al real.
+    // If there is no PKGBUILD here (e.g. `makepkg --version`), forward as-is.
     if !pkgbuild.exists() {
         return exec_real(&real, &args);
     }
@@ -156,19 +157,19 @@ fn cmd_makepkg_wrap(real: PathBuf, args: Vec<String>) -> Result<ExitCode> {
 
     if has_high_or_above {
         if !ui::confirm_continue(&result) {
-            eprintln!("aur-guard :: instalación abortada por el usuario.");
+            eprintln!("aur-guard :: install aborted by user.");
             return Ok(ExitCode::from(1));
         }
-        eprintln!("aur-guard :: continuación confirmada por el usuario.");
+        eprintln!("aur-guard :: user confirmed; continuing.");
     } else {
-        eprintln!("aur-guard :: solo hallazgos menores; continuando sin pedir confirmación.");
+        eprintln!("aur-guard :: only low-severity findings; continuing without prompt.");
     }
 
     exec_real(&real, &args)
 }
 
 fn cmd_pacman_hook() -> Result<ExitCode> {
-    // pacman manda las rutas/objetos por stdin cuando NeedsTargets está activo.
+    // When NeedsTargets is set, pacman sends the targets on stdin.
     let mut targets = Vec::new();
     let stdin = std::io::stdin();
     for line in stdin.lock().lines().map_while(Result::ok) {
@@ -190,17 +191,17 @@ fn cmd_pacman_hook() -> Result<ExitCode> {
     for pkg in targets {
         let name = pkg_name_only(&pkg);
         if !foreign.iter().any(|f| f == &name) {
-            continue; // viene de los repositorios oficiales, no auditamos
+            continue; // comes from official repos, skip
         }
         if let Some(pkgbuild) = find_pkgbuild(&name, &caches) {
             match scanner::scan_file(&pkgbuild) {
                 Ok(r) if !r.is_clean() => combined_findings.push((name, r)),
                 Ok(r) => write_log(&r),
-                Err(e) => eprintln!("aur-guard :: error escaneando {}: {e}", pkgbuild.display()),
+                Err(e) => eprintln!("aur-guard :: error scanning {}: {e}", pkgbuild.display()),
             }
         } else {
             eprintln!(
-                "aur-guard :: paquete AUR «{name}» — PKGBUILD no localizado en cachés conocidas; omito."
+                "aur-guard :: AUR package \"{name}\" — PKGBUILD not found in known caches; skipping."
             );
         }
     }
@@ -223,18 +224,18 @@ fn cmd_pacman_hook() -> Result<ExitCode> {
         return Ok(ExitCode::from(0));
     }
 
-    // Construimos un "result" sintético solo para el prompt.
+    // Synthetic aggregate used only for the prompt.
     let synthetic = ScanResult {
-        path: format!("{} paquete(s) AUR", combined_findings.len()),
+        path: format!("{} AUR package(s)", combined_findings.len()),
         findings: combined_findings.iter().flat_map(|(_, r)| r.findings.clone()).collect(),
         lines_scanned: combined_findings.iter().map(|(_, r)| r.lines_scanned).sum(),
     };
 
     if ui::confirm_continue(&synthetic) {
-        eprintln!("aur-guard :: instalación continuada bajo responsabilidad del usuario.");
+        eprintln!("aur-guard :: continuing install at the user's discretion.");
         Ok(ExitCode::from(0))
     } else {
-        eprintln!("aur-guard :: instalación abortada por el usuario (hook PreTransaction).");
+        eprintln!("aur-guard :: install aborted by user (PreTransaction hook).");
         Ok(ExitCode::from(1))
     }
 }
@@ -242,7 +243,7 @@ fn cmd_pacman_hook() -> Result<ExitCode> {
 fn cmd_rules() -> Result<ExitCode> {
     let rules = patterns::build_rules();
     let color = ui::use_color();
-    eprintln!("aur-guard :: {} reglas activas", rules.len());
+    eprintln!("aur-guard :: {} active rules", rules.len());
     for r in rules {
         let sev = if color {
             format!("{}[{}]\x1b[0m", r.severity.color(), r.severity.label())
@@ -254,19 +255,16 @@ fn cmd_rules() -> Result<ExitCode> {
     Ok(ExitCode::from(0))
 }
 
-// --- utilidades ---
+// --- utilities ---
 
 fn exec_real(real: &Path, args: &[String]) -> Result<ExitCode> {
     use std::os::unix::process::CommandExt;
     let err = Command::new(real).args(args).exec();
-    // si llegamos aquí, exec falló
-    anyhow::bail!("no pude ejecutar {}: {err}", real.display());
+    // If we get here, exec failed.
+    anyhow::bail!("could not exec {}: {err}", real.display());
 }
 
 fn write_log(r: &ScanResult) {
-    if !ui::use_color() {
-        // detección barata de "ejecución no interactiva" → escribimos en /var/log si podemos
-    }
     if std::fs::metadata("/var/log").is_ok() {
         if let Ok(meta) = std::fs::metadata(LOG_PATH) {
             if meta.permissions().readonly() {
@@ -274,19 +272,16 @@ fn write_log(r: &ScanResult) {
                 return;
             }
         }
-        // intentamos /var/log; si falla por permisos, vamos a /tmp
         let parent = Path::new(LOG_PATH).parent().unwrap();
-        if parent.exists() {
-            // probamos con un open append
-            if std::fs::OpenOptions::new()
+        if parent.exists()
+            && std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(LOG_PATH)
                 .is_ok()
-            {
-                ui::append_log(LOG_PATH, r);
-                return;
-            }
+        {
+            ui::append_log(LOG_PATH, r);
+            return;
         }
     }
     ui::append_log(FALLBACK_LOG, r);
@@ -303,7 +298,7 @@ fn list_foreign_packages() -> Vec<String> {
 }
 
 fn pkg_name_only(target: &str) -> String {
-    // pacman emite "pkgname" o a veces "repo/pkgname"; tomamos la última pieza.
+    // pacman emits "pkgname" or sometimes "repo/pkgname"; take the last piece.
     target.rsplit('/').next().unwrap_or(target).to_string()
 }
 
@@ -316,7 +311,7 @@ fn collect_cache_dirs() -> Vec<PathBuf> {
         }
     }
 
-    // SUDO_USER nos da el usuario real cuando el hook corre como root.
+    // SUDO_USER gives us the real user when the hook runs as root.
     let users: Vec<String> = match std::env::var("SUDO_USER") {
         Ok(u) => vec![u],
         Err(_) => std::fs::read_dir("/home")
