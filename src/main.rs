@@ -180,34 +180,50 @@ fn cmd_pacman_hook() -> Result<ExitCode> {
     }
 
     if targets.is_empty() {
+        eprintln!("aur-guard :: no targets received; nothing to audit.");
         return Ok(ExitCode::from(0));
     }
 
     let foreign = list_foreign_packages();
     let caches = collect_cache_dirs();
 
-    let mut combined_findings: Vec<(String, ScanResult)> = Vec::new();
+    let aur_targets: Vec<String> = targets
+        .iter()
+        .map(|p| pkg_name_only(p))
+        .filter(|name| foreign.iter().any(|f| f == name))
+        .collect();
 
-    for pkg in targets {
-        let name = pkg_name_only(&pkg);
-        if !foreign.iter().any(|f| f == &name) {
-            continue; // comes from official repos, skip
-        }
-        if let Some(pkgbuild) = find_pkgbuild(&name, &caches) {
+    if aur_targets.is_empty() {
+        eprintln!(
+            "aur-guard :: {} target(s), 0 from AUR — nothing to audit.",
+            targets.len()
+        );
+        return Ok(ExitCode::from(0));
+    }
+
+    let mut combined_findings: Vec<(String, ScanResult)> = Vec::new();
+    let mut clean_count = 0usize;
+    let mut missing_count = 0usize;
+
+    for name in &aur_targets {
+        if let Some(pkgbuild) = find_pkgbuild(name, &caches) {
             match scanner::scan_file(&pkgbuild) {
-                Ok(r) if !r.is_clean() => combined_findings.push((name, r)),
-                Ok(r) => write_log(&r),
-                Err(e) => eprintln!("aur-guard :: error scanning {}: {e}", pkgbuild.display()),
+                Ok(r) if !r.is_clean() => combined_findings.push((name.clone(), r)),
+                Ok(r) => {
+                    clean_count += 1;
+                    write_log(&r);
+                }
+                Err(e) => {
+                    eprintln!("aur-guard :: error scanning {}: {e}", pkgbuild.display());
+                    missing_count += 1;
+                }
             }
         } else {
             eprintln!(
                 "aur-guard :: AUR package \"{name}\" — PKGBUILD not found in known caches; skipping."
             );
+            missing_count += 1;
         }
-    }
-
-    if combined_findings.is_empty() {
-        return Ok(ExitCode::from(0));
     }
 
     let color = ui::use_color();
@@ -219,6 +235,16 @@ fn cmd_pacman_hook() -> Result<ExitCode> {
         critical_total += r.count_by(Severity::Critical);
         high_total += r.count_by(Severity::High);
     }
+
+    eprintln!(
+        "aur-guard :: {} AUR target(s) — {} clean, {} skipped, {} with findings ({} critical, {} high).",
+        aur_targets.len(),
+        clean_count,
+        missing_count,
+        combined_findings.len(),
+        critical_total,
+        high_total
+    );
 
     if critical_total + high_total == 0 {
         return Ok(ExitCode::from(0));
