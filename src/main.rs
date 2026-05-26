@@ -1,3 +1,4 @@
+mod diff;
 mod patterns;
 mod report;
 mod scanner;
@@ -19,9 +20,10 @@ const FALLBACK_LOG: &str = "/tmp/aur-guard.log";
     name = "aur-guard",
     version,
     about = "Security scanner for AUR PKGBUILDs.",
-    long_about = "aur-guard scans a PKGBUILD for common malicious patterns \
-                  (curl|bash, reverse shells, writes to authorized_keys, sudo, \
-                  suid, ...) and blocks with interactive confirmation."
+    long_about = "aur-guard scans a PKGBUILD (and adjacent .install scriptlets) \
+                  for common malicious patterns, optionally diffs against the \
+                  previously-seen version of the same package to flag freshly \
+                  introduced payloads, and can block the install interactively."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -37,6 +39,9 @@ enum Cmd {
         /// No colors or decoration.
         #[arg(long)]
         plain: bool,
+        /// Skip the supply-chain diff against the cached previous version.
+        #[arg(long)]
+        no_diff: bool,
     },
     /// Same as `scan` but the exit code reflects the result (0 below threshold, 2 at or above).
     Check {
@@ -47,6 +52,9 @@ enum Cmd {
         /// (trusted|ok|sketchy|suspicious|malicious).
         #[arg(long, default_value = "suspicious")]
         threshold: String,
+        /// Skip the supply-chain diff against the cached previous version.
+        #[arg(long)]
+        no_diff: bool,
     },
     /// makepkg wrapper: scan the PKGBUILD in the cwd and, if the result is
     /// concerning, ask for interactive confirmation. On accept, exec the real
@@ -79,8 +87,8 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<ExitCode> {
     match cli.cmd {
-        Cmd::Scan { path, plain } => cmd_scan(path, plain),
-        Cmd::Check { path, plain, threshold } => cmd_check(path, plain, &threshold),
+        Cmd::Scan { path, plain, no_diff } => cmd_scan(path, plain, no_diff),
+        Cmd::Check { path, plain, threshold, no_diff } => cmd_check(path, plain, &threshold, no_diff),
         Cmd::MakepkgWrap { real, args } => cmd_makepkg_wrap(real, args),
         Cmd::PacmanHook => cmd_pacman_hook(),
         Cmd::Rules => cmd_rules(),
@@ -98,9 +106,30 @@ fn resolve_pkgbuild(path: &Path) -> Result<PathBuf> {
     }
 }
 
-fn cmd_scan(path: PathBuf, plain: bool) -> Result<ExitCode> {
+/// One-stop scan used by every CLI path. Scans the PKGBUILD + adjacent
+/// `*.install` scriptlets, and (unless disabled) diffs against the cached
+/// previous PKGBUILD content to mark new findings and escalate tier.
+fn full_scan(path: &Path, with_diff: bool) -> Result<ScanResult> {
+    let mut result = scanner::scan_pkgbuild_bundle(path)
+        .with_context(|| format!("reading {}", path.display()))?;
+
+    if with_diff {
+        let current = std::fs::read_to_string(path).unwrap_or_default();
+        if let Some(pkgname) = diff::pkgname_from(&current) {
+            if let Some(prev) = diff::load_previous(&pkgname) {
+                diff::mark_new_findings(&mut result.findings, &prev, &current);
+                diff::escalate_tier(&mut result);
+            }
+            let _ = diff::save_current(&pkgname, &current);
+        }
+    }
+
+    Ok(result)
+}
+
+fn cmd_scan(path: PathBuf, plain: bool, no_diff: bool) -> Result<ExitCode> {
     let path = resolve_pkgbuild(&path)?;
-    let result = scanner::scan_file(&path).with_context(|| format!("reading {}", path.display()))?;
+    let result = full_scan(&path, !no_diff)?;
     let color = !plain && ui::use_color();
     ui::print_result(&result, color);
     Ok(if result.is_clean() {
@@ -118,10 +147,10 @@ fn parse_threshold(s: &str) -> Result<Tier> {
     })
 }
 
-fn cmd_check(path: PathBuf, plain: bool, threshold: &str) -> Result<ExitCode> {
+fn cmd_check(path: PathBuf, plain: bool, threshold: &str, no_diff: bool) -> Result<ExitCode> {
     let thr = parse_threshold(threshold)?;
     let path = resolve_pkgbuild(&path)?;
-    let result = scanner::scan_file(&path)?;
+    let result = full_scan(&path, !no_diff)?;
     let color = !plain && ui::use_color();
     ui::print_result(&result, color);
     Ok(if result.tier >= thr {
@@ -140,7 +169,7 @@ fn cmd_makepkg_wrap(real: PathBuf, args: Vec<String>) -> Result<ExitCode> {
         return exec_real(&real, &args);
     }
 
-    let result = scanner::scan_file(&pkgbuild)?;
+    let result = full_scan(&pkgbuild, true)?;
     let color = ui::use_color();
     ui::print_result(&result, color);
     write_log(&result);
@@ -200,7 +229,7 @@ fn cmd_pacman_hook() -> Result<ExitCode> {
 
     for name in &aur_targets {
         if let Some(pkgbuild) = find_pkgbuild(name, &caches) {
-            match scanner::scan_file(&pkgbuild) {
+            match full_scan(&pkgbuild, true) {
                 Ok(r) => scanned.push((name.clone(), r)),
                 Err(e) => {
                     eprintln!("aur-guard :: error scanning {}: {e}", pkgbuild.display());

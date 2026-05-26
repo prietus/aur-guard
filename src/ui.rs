@@ -36,21 +36,46 @@ pub fn print_result(result: &ScanResult, color: bool) {
             gate_id
         );
     }
+    if let Some(reason) = &result.promoted_by_diff {
+        let yellow = if color { "\x1b[33m" } else { "" };
+        eprintln!(
+            "  {yellow}→ supply-chain diff: {}{reset}",
+            reason
+        );
+    }
 
     if result.is_clean() {
         eprintln!("  {green}✓ No findings.{reset}");
         return;
     }
 
-    eprintln!("  {} finding(s):", result.findings.len());
+    let new_count = result.findings.iter().filter(|f| f.is_new).count();
+    if new_count > 0 {
+        let yellow = if color { "\x1b[33m" } else { "" };
+        eprintln!(
+            "  {} finding(s), {yellow}{new_count} new since the previous version{reset}:",
+            result.findings.len()
+        );
+    } else {
+        eprintln!("  {} finding(s):", result.findings.len());
+    }
     eprintln!();
 
     for f in &result.findings {
         let sev = f.severity();
         let sev_color = if color { sev.color() } else { "" };
         let gate_marker = if f.override_gate { " ⛔" } else { "" };
+        let new_marker = if f.is_new {
+            paint(color, "\x1b[1;33m", " [NEW]")
+        } else {
+            String::new()
+        };
+        let file_marker = match &f.source_file {
+            Some(name) => format!(" {dim}[+{name}]{reset}"),
+            None => String::new(),
+        };
         eprintln!(
-            "  {}  {bold}{}{reset}  {dim}[{} · {}pts{}]{reset}",
+            "  {}{new_marker}  {bold}{}{reset}{file_marker}  {dim}[{} · {}pts{}]{reset}",
             paint(color, sev_color, &format!("[{}]", sev.label())),
             f.title,
             f.rule_id,
@@ -120,24 +145,29 @@ pub fn append_log(path: &str, result: &ScanResult) {
     };
     let ts = unix_timestamp();
     let gate = result.override_gate_fired.unwrap_or("-");
+    let promoted = result.promoted_by_diff.as_deref().unwrap_or("-");
     let _ = writeln!(
         f,
-        "{ts} target={} lines={} tier={} score={} findings={} gate={}",
+        "{ts} target={} lines={} tier={} score={} findings={} gate={} promoted={:?}",
         result.path,
         result.lines_scanned,
         result.tier.label(),
         result.score,
         result.findings.len(),
         gate,
+        promoted,
     );
     for x in &result.findings {
+        let src = x.source_file.as_deref().unwrap_or("PKGBUILD");
         let _ = writeln!(
             f,
-            "{ts}   [{}] {} points={} gate={} line={} snippet={:?}",
+            "{ts}   [{}] {} points={} gate={} new={} src={} line={} snippet={:?}",
             x.severity().label(),
             x.rule_id,
             x.points,
             x.override_gate,
+            x.is_new,
+            src,
             x.line,
             x.snippet
         );

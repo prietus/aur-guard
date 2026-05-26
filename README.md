@@ -50,11 +50,17 @@ aur-guard scan PKGBUILD             # scan and print findings
 aur-guard scan /path/to/package/    # finds PKGBUILD inside the directory
 aur-guard check PKGBUILD            # exit 0 below threshold, 2 at or above
 aur-guard check --threshold malicious PKGBUILD   # only block on tier MALICIOUS
+aur-guard scan --no-diff PKGBUILD   # skip supply-chain diff (don't read/write history cache)
 aur-guard rules                     # list every active rule
 ```
 
 `check` defaults to `--threshold suspicious`. Valid thresholds:
 `trusted | ok | sketchy | suspicious | malicious`.
+
+Every scan also picks up any `*.install` scriptlets that sit next to the
+PKGBUILD and audits them with the same rules — `.install` files run as root
+post-install, with no sandboxing, so they are a juicy attack surface. Findings
+from a scriptlet show a `[+foo.install]` tag in the output.
 
 Once the shim is installed the flow is transparent:
 
@@ -90,6 +96,34 @@ Per-finding badges (`[CRITICAL]`, `[HIGH]`, `[MEDIUM]`, `[LOW]`) are a display
 shorthand derived from the rule's points; they describe *how heavy a single
 match is*, not the overall verdict. The tier on the first output line is what
 the shim and hook actually decide on.
+
+### Supply-chain diff
+
+Every successful scan caches the PKGBUILD content under
+`~/.cache/aur-guard/pkgbuild-history/<pkgname>.txt` (or `$XDG_CACHE_HOME/…`,
+or `$AUR_GUARD_HISTORY_DIR/…` if set). The next scan of the same package
+compares the current content against the cached one and marks any finding
+whose **line text did not exist in the previous version** as `[NEW]`. The
+output also gains a `X new since the previous version` header.
+
+This is the key defence against supply-chain attacks on previously-trusted
+packages: a package that has been clean for months and suddenly grows a
+`curl … | bash` line is much more alarming than a package that has had one
+forever.
+
+Promotion policy on top of the base score:
+
+| New finding's points | Tier promoted to (if currently lower) |
+|---|---|
+| ≥ 80 | `MALICIOUS` |
+| ≥ 60 | `SUSPICIOUS` |
+| < 60 | no promotion (legitimate package churn) |
+
+When promotion fires, the scan output prints `→ supply-chain diff: …` near
+the override-gate line so you can see *why* the tier went up.
+
+Bypass the diff with `--no-diff` (for one-off scans, CI, etc.). The pacman
+hook and the makepkg shim always use it.
 
 ## Integration with AUR helpers
 
@@ -196,11 +230,12 @@ the post-build audit.
 | `AUR_GUARD_REAL_MAKEPKG` | Path to the real `makepkg` (default `/usr/bin/makepkg`). |
 | `AUR_GUARD_BIN` | Path to the `aur-guard` binary used by the shim (default `/usr/local/bin/aur-guard`). |
 | `AUR_GUARD_CACHE_DIRS` | Colon-separated list of extra directories where the pacman hook should look for PKGBUILDs. |
+| `AUR_GUARD_HISTORY_DIR` | Override the supply-chain history cache directory (default `$XDG_CACHE_HOME/aur-guard/pkgbuild-history` or the equivalent under the invoking user's `~/.cache/`). |
 | `NO_COLOR=1` | Disable coloured output. |
 
 ## Rules
 
-32 detection rules — 29 regex-based (visible in `aur-guard rules`) plus 3
+33 detection rules — 29 regex-based (visible in `aur-guard rules`) plus 4
 PKGBUILD-metadata checks built into the scanner. Grouped by family:
 
 | Family | Covers | Gates |
@@ -213,10 +248,19 @@ PKGBUILD-metadata checks built into the scanner. Grouped by family:
 | AG050–AG052 | Obfuscation (base64, xxd, huge base64 strings) | AG050-051 |
 | AG060–AG062 | Suspicious network (literal IPs, URL shorteners, tunnels) | — |
 | AG070–AG072 | Credential / wallet access and exfiltration | — |
-| AG080–AG082 | PKGBUILD metadata (SKIP checksums, http / git+http sources) | — |
+| AG080–AG083 | PKGBUILD provenance (SKIP checksums, http / git+http sources, `url=` ↔ `source=()` mismatch) | — |
 
 Rules marked as gates force the result to tier `MALICIOUS` on a single match.
 The rest accumulate points into the trust score (see *Scoring model*).
+
+**AG083 — url vs source cross-check** deserves a callout: it parses the
+`url=` field (the declared upstream project) and every URL in `source=()` /
+`source_${arch}=()`, then compares them. On GitHub/GitLab/Codeberg/Bitbucket
+the comparison is at the **organisation** level, so a package that declares
+`url=https://github.com/legit-project/foo` but downloads from
+`https://github.com/attacker-fork/foo` will trip the rule even though both
+URLs hit the same host. This catches the classic `-bin` impersonation trick
+that the bytecode-level scanners miss entirely.
 
 ## Limitations
 
@@ -252,10 +296,14 @@ Test with:
 cargo build --release
 ./target/release/aur-guard scan test-fixtures/PKGBUILD.malicious
 ./target/release/aur-guard scan test-fixtures/PKGBUILD.benign
+./target/release/aur-guard scan test-fixtures/PKGBUILD.impersonate   # AG083 demo
+./target/release/aur-guard scan test-fixtures/with-install/          # .install audit demo
 ```
 
 Expected: malicious lands at `MALICIOUS` (trust 0/100, override gate fired),
-benign at `TRUSTED` (trust 100/100, no findings).
+benign at `TRUSTED` (trust 100/100, no findings), impersonate at `SKETCHY`
+with AG083 firing, and the `with-install` bundle at `MALICIOUS` with
+findings tagged `[+foo.install]`.
 
 ## License
 

@@ -1,0 +1,18 @@
+# Maintainer: Example <example@domain.tld>
+# Fixture: tests .install scriptlet auditing.
+# The PKGBUILD itself is clean. The malicious payload lives in foo.install.
+pkgname=foo
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Clean PKGBUILD, malicious .install scriptlet"
+arch=('x86_64')
+url="https://example.org/foo"
+license=('MIT')
+depends=('glibc')
+install=foo.install
+source=("https://example.org/releases/${pkgname}-${pkgver}.tar.gz")
+sha256sums=('a1b2c3d4e5f6071829384756abcdef0123456789abcdef0123456789abcdef01')
+
+package() {
+    install -Dm0755 foo "$pkgdir/usr/bin/foo"
+}
