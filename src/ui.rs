@@ -1,4 +1,4 @@
-use crate::report::{ScanResult, Severity};
+use crate::report::ScanResult;
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, IsTerminal, Write};
 
@@ -25,28 +25,37 @@ pub fn print_result(result: &ScanResult, color: bool) {
         result.path, result.lines_scanned
     );
 
+    let tier_label = paint(color, result.tier.color(), &format!("[{}]", result.tier.label()));
+    eprintln!(
+        "  {tier_label} {bold}trust score {}/100{reset}",
+        result.score
+    );
+    if let Some(gate_id) = result.override_gate_fired {
+        eprintln!(
+            "  {dim}→ override gate fired ({}) — one match is enough to fail the build{reset}",
+            gate_id
+        );
+    }
+
     if result.is_clean() {
         eprintln!("  {green}✓ No findings.{reset}");
         return;
     }
 
-    let crit = result.count_by(Severity::Critical);
-    let high = result.count_by(Severity::High);
-    let med = result.count_by(Severity::Medium);
-    let low = result.count_by(Severity::Low);
-    eprintln!(
-        "  {} finding(s):  critical={crit}  high={high}  medium={med}  low={low}",
-        result.findings.len()
-    );
+    eprintln!("  {} finding(s):", result.findings.len());
     eprintln!();
 
     for f in &result.findings {
-        let sev_color = if color { f.severity.color() } else { "" };
+        let sev = f.severity();
+        let sev_color = if color { sev.color() } else { "" };
+        let gate_marker = if f.override_gate { " ⛔" } else { "" };
         eprintln!(
-            "  {}  {bold}{}{reset}  {dim}[{}]{reset}",
-            paint(color, sev_color, &format!("[{}]", f.severity.label())),
+            "  {}  {bold}{}{reset}  {dim}[{} · {}pts{}]{reset}",
+            paint(color, sev_color, &format!("[{}]", sev.label())),
             f.title,
-            f.rule_id
+            f.rule_id,
+            f.points,
+            gate_marker
         );
         eprintln!("    {dim}line {}:{reset} {}", f.line, f.snippet.trim());
         eprintln!("    {}", f.description);
@@ -57,12 +66,11 @@ pub fn print_result(result: &ScanResult, color: bool) {
 /// Asks for confirmation over /dev/tty so the prompt works even when stdin/stdout
 /// are redirected (typical when invoked from a pacman hook or makepkg wrapper).
 pub fn confirm_continue(result: &ScanResult) -> bool {
-    let crit = result.count_by(Severity::Critical);
-    let high = result.count_by(Severity::High);
-    let med = result.count_by(Severity::Medium);
-
     let prompt = format!(
-        "aur-guard :: {crit} critical / {high} high / {med} medium. Continue with the install? [y/N] "
+        "aur-guard :: tier {} (trust {}/100), {} finding(s). Continue with the install? [y/N] ",
+        result.tier.label(),
+        result.score,
+        result.findings.len(),
     );
 
     // Try opening /dev/tty so we can talk to the user even when pacman/makepkg
@@ -111,23 +119,25 @@ pub fn append_log(path: &str, result: &ScanResult) {
         return;
     };
     let ts = unix_timestamp();
+    let gate = result.override_gate_fired.unwrap_or("-");
     let _ = writeln!(
         f,
-        "{ts} target={} lines={} findings={} crit={} high={} med={} low={}",
+        "{ts} target={} lines={} tier={} score={} findings={} gate={}",
         result.path,
         result.lines_scanned,
+        result.tier.label(),
+        result.score,
         result.findings.len(),
-        result.count_by(Severity::Critical),
-        result.count_by(Severity::High),
-        result.count_by(Severity::Medium),
-        result.count_by(Severity::Low),
+        gate,
     );
     for x in &result.findings {
         let _ = writeln!(
             f,
-            "{ts}   [{}] {} line={} snippet={:?}",
-            x.severity.label(),
+            "{ts}   [{}] {} points={} gate={} line={} snippet={:?}",
+            x.severity().label(),
             x.rule_id,
+            x.points,
+            x.override_gate,
             x.line,
             x.snippet
         );
@@ -143,3 +153,4 @@ fn unix_timestamp() -> String {
         .unwrap_or(0);
     format!("[{}]", secs)
 }
+

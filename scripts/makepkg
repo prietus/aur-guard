@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# AUR-GUARD-SHIM-MARKER  (do not remove — package scriptlets use this to
+# verify the shim is ours before touching /usr/local/bin/makepkg)
 # makepkg shim that passes through aur-guard before calling the real makepkg.
 #
 # Install: place at /usr/local/bin/makepkg (mode 0755). /usr/local/bin precedes

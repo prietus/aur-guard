@@ -9,7 +9,7 @@ use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
-use crate::report::{ScanResult, Severity};
+use crate::report::{ScanResult, Tier};
 
 const LOG_PATH: &str = "/var/log/aur-guard.log";
 const FALLBACK_LOG: &str = "/tmp/aur-guard.log";
@@ -38,18 +38,19 @@ enum Cmd {
         #[arg(long)]
         plain: bool,
     },
-    /// Same as `scan` but the exit code reflects the result (0 clean, 2 with findings).
+    /// Same as `scan` but the exit code reflects the result (0 below threshold, 2 at or above).
     Check {
         path: PathBuf,
         #[arg(long)]
         plain: bool,
-        /// Minimum severity that triggers a non-zero exit (low|medium|high|critical).
-        #[arg(long, default_value = "high")]
+        /// Minimum tier that triggers a non-zero exit
+        /// (trusted|ok|sketchy|suspicious|malicious).
+        #[arg(long, default_value = "suspicious")]
         threshold: String,
     },
-    /// makepkg wrapper: scan the PKGBUILD in the cwd and, if there are findings,
-    /// ask for interactive confirmation. On accept, exec the real makepkg with the
-    /// given arguments.
+    /// makepkg wrapper: scan the PKGBUILD in the cwd and, if the result is
+    /// concerning, ask for interactive confirmation. On accept, exec the real
+    /// makepkg with the given arguments.
     MakepkgWrap {
         /// Path to the real makepkg binary.
         #[arg(long, default_value = "/usr/bin/makepkg", env = "AUR_GUARD_REAL_MAKEPKG")]
@@ -109,13 +110,11 @@ fn cmd_scan(path: PathBuf, plain: bool) -> Result<ExitCode> {
     })
 }
 
-fn parse_threshold(s: &str) -> Result<Severity> {
-    Ok(match s.to_lowercase().as_str() {
-        "low" => Severity::Low,
-        "medium" | "med" => Severity::Medium,
-        "high" => Severity::High,
-        "critical" | "crit" => Severity::Critical,
-        other => anyhow::bail!("unknown threshold: {other}"),
+fn parse_threshold(s: &str) -> Result<Tier> {
+    Tier::parse(s).ok_or_else(|| {
+        anyhow::anyhow!(
+            "unknown threshold {s:?}; expected one of: trusted, ok, sketchy, suspicious, malicious"
+        )
     })
 }
 
@@ -125,11 +124,11 @@ fn cmd_check(path: PathBuf, plain: bool, threshold: &str) -> Result<ExitCode> {
     let result = scanner::scan_file(&path)?;
     let color = !plain && ui::use_color();
     ui::print_result(&result, color);
-    let trip = result
-        .findings
-        .iter()
-        .any(|f| f.severity.rank() >= thr.rank());
-    Ok(if trip { ExitCode::from(2) } else { ExitCode::from(0) })
+    Ok(if result.tier >= thr {
+        ExitCode::from(2)
+    } else {
+        ExitCode::from(0)
+    })
 }
 
 fn cmd_makepkg_wrap(real: PathBuf, args: Vec<String>) -> Result<ExitCode> {
@@ -146,25 +145,20 @@ fn cmd_makepkg_wrap(real: PathBuf, args: Vec<String>) -> Result<ExitCode> {
     ui::print_result(&result, color);
     write_log(&result);
 
-    if result.is_clean() {
+    // Trusted/Ok run through. Sketchy prints findings but doesn't prompt.
+    // Suspicious/Malicious require interactive confirmation.
+    if result.tier < Tier::Suspicious {
+        if result.tier == Tier::Sketchy {
+            eprintln!("aur-guard :: tier SKETCHY; continuing without prompt.");
+        }
         return exec_real(&real, &args);
     }
 
-    let has_high_or_above = result
-        .findings
-        .iter()
-        .any(|f| f.severity.rank() >= Severity::High.rank());
-
-    if has_high_or_above {
-        if !ui::confirm_continue(&result) {
-            eprintln!("aur-guard :: install aborted by user.");
-            return Ok(ExitCode::from(1));
-        }
-        eprintln!("aur-guard :: user confirmed; continuing.");
-    } else {
-        eprintln!("aur-guard :: only low-severity findings; continuing without prompt.");
+    if !ui::confirm_continue(&result) {
+        eprintln!("aur-guard :: install aborted by user.");
+        return Ok(ExitCode::from(1));
     }
-
+    eprintln!("aur-guard :: user confirmed; continuing.");
     exec_real(&real, &args)
 }
 
@@ -201,18 +195,13 @@ fn cmd_pacman_hook() -> Result<ExitCode> {
         return Ok(ExitCode::from(0));
     }
 
-    let mut combined_findings: Vec<(String, ScanResult)> = Vec::new();
-    let mut clean_count = 0usize;
+    let mut scanned: Vec<(String, ScanResult)> = Vec::new();
     let mut missing_count = 0usize;
 
     for name in &aur_targets {
         if let Some(pkgbuild) = find_pkgbuild(name, &caches) {
             match scanner::scan_file(&pkgbuild) {
-                Ok(r) if !r.is_clean() => combined_findings.push((name.clone(), r)),
-                Ok(r) => {
-                    clean_count += 1;
-                    write_log(&r);
-                }
+                Ok(r) => scanned.push((name.clone(), r)),
                 Err(e) => {
                     eprintln!("aur-guard :: error scanning {}: {e}", pkgbuild.display());
                     missing_count += 1;
@@ -227,35 +216,36 @@ fn cmd_pacman_hook() -> Result<ExitCode> {
     }
 
     let color = ui::use_color();
-    let mut critical_total = 0usize;
-    let mut high_total = 0usize;
-    for (_, r) in &combined_findings {
+    let mut tier_counts = [0usize; 5]; // Trusted, Ok, Sketchy, Suspicious, Malicious
+    let mut worst_tier = Tier::Trusted;
+    for (_, r) in &scanned {
         ui::print_result(r, color);
         write_log(r);
-        critical_total += r.count_by(Severity::Critical);
-        high_total += r.count_by(Severity::High);
+        tier_counts[tier_index(r.tier)] += 1;
+        if r.tier > worst_tier {
+            worst_tier = r.tier;
+        }
     }
 
     eprintln!(
-        "aur-guard :: {} AUR target(s) — {} clean, {} skipped, {} with findings ({} critical, {} high).",
+        "aur-guard :: {} AUR target(s) — trusted={} ok={} sketchy={} suspicious={} malicious={} (skipped {}).",
         aur_targets.len(),
-        clean_count,
+        tier_counts[0],
+        tier_counts[1],
+        tier_counts[2],
+        tier_counts[3],
+        tier_counts[4],
         missing_count,
-        combined_findings.len(),
-        critical_total,
-        high_total
     );
 
-    if critical_total + high_total == 0 {
+    if worst_tier < Tier::Suspicious {
         return Ok(ExitCode::from(0));
     }
 
-    // Synthetic aggregate used only for the prompt.
-    let synthetic = ScanResult {
-        path: format!("{} AUR package(s)", combined_findings.len()),
-        findings: combined_findings.iter().flat_map(|(_, r)| r.findings.clone()).collect(),
-        lines_scanned: combined_findings.iter().map(|(_, r)| r.lines_scanned).sum(),
-    };
+    let synthetic = scanner::aggregate(
+        &scanned,
+        format!("{} AUR package(s)", scanned.len()),
+    );
 
     if ui::confirm_continue(&synthetic) {
         eprintln!("aur-guard :: continuing install at the user's discretion.");
@@ -266,17 +256,29 @@ fn cmd_pacman_hook() -> Result<ExitCode> {
     }
 }
 
+fn tier_index(t: Tier) -> usize {
+    match t {
+        Tier::Trusted => 0,
+        Tier::Ok => 1,
+        Tier::Sketchy => 2,
+        Tier::Suspicious => 3,
+        Tier::Malicious => 4,
+    }
+}
+
 fn cmd_rules() -> Result<ExitCode> {
     let rules = patterns::build_rules();
     let color = ui::use_color();
     eprintln!("aur-guard :: {} active rules", rules.len());
     for r in rules {
-        let sev = if color {
-            format!("{}[{}]\x1b[0m", r.severity.color(), r.severity.label())
+        let sev = report::Severity::from_points(r.points, r.override_gate);
+        let badge = if color {
+            format!("{}[{}]\x1b[0m", sev.color(), sev.label())
         } else {
-            format!("[{}]", r.severity.label())
+            format!("[{}]", sev.label())
         };
-        println!("{sev:18}  {}  {}", r.id, r.title);
+        let gate = if r.override_gate { " ⛔gate" } else { "      " };
+        println!("{badge:18}  {}  {:>2}pts {}  {}", r.id, r.points, gate, r.title);
     }
     Ok(ExitCode::from(0))
 }

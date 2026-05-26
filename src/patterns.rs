@@ -1,19 +1,24 @@
-use crate::report::Severity;
 use regex::Regex;
 
 pub struct Rule {
     pub id: &'static str,
-    pub severity: Severity,
+    /// Risk points contributed when this rule matches. Used by the scoring
+    /// algorithm; the per-finding "severity" label is derived from points.
+    pub points: u32,
+    /// If true, a single match alone forces the result to tier `Malicious`,
+    /// regardless of how few other findings there are.
+    pub override_gate: bool,
     pub title: &'static str,
     pub description: &'static str,
     pub regex: Regex,
 }
 
 macro_rules! rule {
-    ($id:expr, $sev:expr, $title:expr, $desc:expr, $re:expr) => {
+    ($id:expr, $points:expr, $gate:expr, $title:expr, $desc:expr, $re:expr) => {
         Rule {
             id: $id,
-            severity: $sev,
+            points: $points,
+            override_gate: $gate,
             title: $title,
             description: $desc,
             regex: Regex::new($re).expect(concat!("invalid regex in rule ", $id)),
@@ -23,31 +28,27 @@ macro_rules! rule {
 
 pub fn build_rules() -> Vec<Rule> {
     vec![
-        // --- Remote content execution ---
+        // --- Remote content execution (gates) ---
         rule!(
-            "AG001",
-            Severity::Critical,
+            "AG001", 95, true,
             "Remote download piped into a shell",
             "curl/wget/fetch output piped directly into bash/sh/zsh/etc. The downloaded content is unverified and can change between installs.",
             r"(?:curl|wget|fetch|aria2c)\s+[^\n|;&]*?\|\s*(?:sudo\s+)?(?:bash|sh|zsh|ksh|fish|dash|ash)\b"
         ),
         rule!(
-            "AG002",
-            Severity::Critical,
+            "AG002", 95, true,
             "Process substitution from remote download",
             "Equivalent to 'curl | bash' via bash <(curl ...). Executes remote content without verification.",
             r"(?:bash|sh|zsh|ksh|source|\.)\s+<\(\s*(?:curl|wget|fetch)\s"
         ),
         rule!(
-            "AG003",
-            Severity::Critical,
+            "AG003", 95, true,
             "eval over remote download",
             "eval executes its argument as code. Combined with curl/wget it downloads and runs unverified code.",
             r#"eval\s+["`]?\$?\(\s*(?:curl|wget|fetch)\s"#
         ),
         rule!(
-            "AG004",
-            Severity::High,
+            "AG004", 75, false,
             "source/. from a remote URL",
             "Loads and runs a script directly from the network instead of declaring it in the source array.",
             r#"(?:^|\s)(?:source|\.)\s+["']?https?://"#
@@ -55,59 +56,51 @@ pub fn build_rules() -> Vec<Rule> {
 
         // --- Reverse shells ---
         rule!(
-            "AG010",
-            Severity::Critical,
+            "AG010", 95, true,
             "netcat reverse shell (-e)",
             "netcat with -e executes a program on every connection; classic reverse shell pattern.",
             r"\bnc(?:at)?\s+(?:-[a-zA-Z]*e[a-zA-Z]*)\s+\S+\s+\d+"
         ),
         rule!(
-            "AG011",
-            Severity::Critical,
+            "AG011", 95, true,
             "bash /dev/tcp reverse shell",
             "Classic reverse shell using bash's virtual /dev/tcp device.",
             r"bash\s+-i\s+>&?\s*/dev/(?:tcp|udp)/"
         ),
         rule!(
-            "AG012",
-            Severity::High,
+            "AG012", 80, false,
             "Python reverse shell",
             "socket + pty + subprocess one-liner typical of reverse shells.",
             r#"python[0-9.]*\s+-c\s+["'][^"']*\b(?:socket|pty)\b[^"']*\b(?:dup2|spawn|connect)\b"#
         ),
         rule!(
-            "AG013",
-            Severity::High,
+            "AG013", 75, false,
             "Perl reverse shell",
             "Perl with socket + exec is characteristic of reverse shells.",
             r#"perl\s+-e\s+["'][^"']*\bsocket\b[^"']*\bexec\b"#
         ),
 
-        // --- Destructive commands ---
+        // --- Destructive commands (gates) ---
         rule!(
-            "AG020",
-            Severity::Critical,
+            "AG020", 95, true,
             "Recursive rm aimed at the system root",
             "rm -rf at or near /. Even running as a normal user can wipe HOME, and --no-preserve-root can wipe the system itself.",
             r"\brm\s+(?:-[a-zA-Z]+\s+)*-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+(?:--no-preserve-root\s+)?(?:/(?:\s|\*|$)|~(?:\s|/|$)|\$HOME|\$ROOT)"
         ),
         rule!(
-            "AG021",
-            Severity::Critical,
+            "AG021", 90, true,
             "dd writing to a block device",
             "dd with of=/dev/sd*, nvme*, vd*, hd* will destroy disk data.",
             r"\bdd\s+[^\n;&|]*\bof=/dev/(?:sd|nvme|hd|vd|mmcblk|loop|disk)"
         ),
         rule!(
-            "AG022",
-            Severity::Critical,
+            "AG022", 90, true,
             "Filesystem format on a device",
             "mkfs/wipefs on a device destroys existing data.",
             r"\b(?:mkfs(?:\.\w+)?|wipefs|shred)\s+[^\n;&|]*/dev/"
         ),
         rule!(
-            "AG023",
-            Severity::Critical,
+            "AG023", 90, true,
             "Fork bomb",
             "Classic bash fork bomb construct that exhausts system resources.",
             r":\(\)\s*\{\s*:\s*\|\s*:?\s*&\s*\}\s*;\s*:"
@@ -115,36 +108,31 @@ pub fn build_rules() -> Vec<Rule> {
 
         // --- Persistence / backdoor ---
         rule!(
-            "AG030",
-            Severity::High,
+            "AG030", 75, false,
             "Writes to authorized_keys or system accounts",
             "Adding SSH keys or modifying passwd/shadow/sudoers from a PKGBUILD is a backdoor technique.",
             r#"(?:>>?|tee\s+(?:-a\s+)?)\s*["']?(?:(?:~|\$HOME|/root|/home/[^/\s]+)/\.ssh/authorized_keys|/etc/(?:passwd|shadow|sudoers(?:\.d)?))"#
         ),
         rule!(
-            "AG031",
-            Severity::High,
+            "AG031", 60, false,
             "Modifies shell startup files",
             "Touching .bashrc, .zshrc, .profile, etc. from build() establishes persistence in the user's session.",
             r#"(?:>>?|tee\s+(?:-a\s+)?)\s*["']?(?:~|\$HOME|/root|/home/[^/\s]+)/\.(?:bashrc|bash_profile|bash_login|zshrc|zshenv|zprofile|profile|xprofile|xinitrc)"#
         ),
         rule!(
-            "AG032",
-            Severity::High,
+            "AG032", 60, false,
             "crontab manipulation",
             "Adding entries to crontab or /etc/cron* is a common persistence mechanism.",
             r"(?:\bcrontab\s+-?[el]?\b|\|\s*crontab\b|>\s*/(?:etc|var/spool)/cron)"
         ),
         rule!(
-            "AG033",
-            Severity::High,
+            "AG033", 55, false,
             "systemd unit enabled during build",
             "systemctl enable/start inside a PKGBUILD activates services without consent. This belongs in a .install scriptlet.",
             r"\bsystemctl\s+(?:--user\s+)?(?:enable|start|restart|--now)\b"
         ),
         rule!(
-            "AG034",
-            Severity::High,
+            "AG034", 50, false,
             "User/group added during build",
             "useradd/groupadd/usermod outside an .install scriptlet may create privileged accounts behind the user's back.",
             r"\b(?:useradd|groupadd|usermod|gpasswd)\b"
@@ -152,45 +140,39 @@ pub fn build_rules() -> Vec<Rule> {
 
         // --- Privilege escalation ---
         rule!(
-            "AG040",
-            Severity::High,
+            "AG040", 55, false,
             "sudo inside the PKGBUILD",
             "makepkg refuses to run as root, so sudo inside a PKGBUILD is an attempt to gain privilege during build.",
             r"(?m)^[^#\n]*\bsudo\s+\S"
         ),
         rule!(
-            "AG041",
-            Severity::High,
+            "AG041", 60, false,
             "Sets SUID/SGID bit",
             "chmod with numeric mode 4xxx/2xxx or +s allows execution with the file owner's privileges.",
             r"\bchmod\s+(?:-[a-zA-Z]+\s+)*(?:[2467]\d{3}|[ugo]?\+s|u\+xs|g\+xs)\b"
         ),
         rule!(
-            "AG042",
-            Severity::High,
+            "AG042", 55, false,
             "Capabilities granted to a binary",
             "setcap can grant elevated capabilities (cap_net_admin, cap_sys_admin, etc.) to packaged binaries.",
             r"\bsetcap\s+(?:cap_|all=)"
         ),
 
-        // --- Obfuscation ---
+        // --- Obfuscation (encoded payload + executor = gate) ---
         rule!(
-            "AG050",
-            Severity::High,
+            "AG050", 85, true,
             "base64 payload decoded and executed",
             "base64 -d piped to bash/sh/eval typically hides payloads.",
             r"\b(?:base64\s+(?:-d|--decode)|openssl\s+(?:enc\s+)?-base64\s+-d)\b[^\n;&|]*\|\s*(?:bash|sh|zsh|eval)"
         ),
         rule!(
-            "AG051",
-            Severity::High,
+            "AG051", 85, true,
             "Hex payload decoded and executed",
             "xxd -r or printf with \\x escapes piped to a shell hides payloads.",
             r#"\b(?:xxd\s+-r|printf\s+["'][^"']*(?:\\x[0-9a-fA-F]{2}){4,})[^\n;&|]*\|\s*(?:bash|sh|zsh)"#
         ),
         rule!(
-            "AG052",
-            Severity::Medium,
+            "AG052", 40, false,
             "Variable holding a large base64 blob",
             "A variable assigned a long base64 string near an eval/decode call is a typical obfuscation pattern.",
             r#"=\s*["'][A-Za-z0-9+/]{120,}={0,2}["']"#
@@ -198,22 +180,19 @@ pub fn build_rules() -> Vec<Rule> {
 
         // --- Network ---
         rule!(
-            "AG060",
-            Severity::Medium,
+            "AG060", 30, false,
             "Connection to a literal IP",
             "Downloads or connections to raw IP addresses instead of domains. Unusual and harder to audit.",
             r"(?:curl|wget|nc|ncat|ssh|scp)\s+[^\n;&|]*\b(?:https?://|//)?(?:\d{1,3}\.){3}\d{1,3}\b"
         ),
         rule!(
-            "AG061",
-            Severity::Medium,
+            "AG061", 50, false,
             "URL shortener as a source",
             "Shorteners hide the real destination and are extremely unusual in honest PKGBUILDs.",
             r"https?://(?:bit\.ly|tinyurl\.com|goo\.gl|t\.co|ow\.ly|is\.gd|buff\.ly|adf\.ly|cutt\.ly|rebrand\.ly)/"
         ),
         rule!(
-            "AG062",
-            Severity::Medium,
+            "AG062", 50, false,
             "Tunneling (Cloudflare/ngrok/serveo)",
             "Reverse-tunnel services used to expose hosts. Not expected in a package build.",
             r"\b(?:ngrok|cloudflared|serveo\.net|localhost\.run|pinggy\.io|loophole\.cloud)\b"
@@ -221,22 +200,19 @@ pub fn build_rules() -> Vec<Rule> {
 
         // --- Data exfiltration ---
         rule!(
-            "AG070",
-            Severity::High,
+            "AG070", 75, false,
             "Reads user SSH keys",
             "Accessing private keys (~/.ssh/id_*) from a PKGBUILD has no legitimate justification.",
             r"(?:~|\$HOME|/root|/home/[^/\s]+)/\.ssh/(?:id_(?:rsa|ed25519|ecdsa|dsa)|known_hosts)\b"
         ),
         rule!(
-            "AG071",
-            Severity::High,
+            "AG071", 75, false,
             "Reads wallets / credentials / tokens",
             "Reads known credential files (wallets, gnome-keyring, browsers, .env).",
             r"(?:~|\$HOME|/root|/home/[^/\s]+)/(?:\.(?:bitcoin|electrum|ethereum|gnupg|aws|kube|docker|netrc|config/(?:google-chrome|chromium|BraveSoftware|Mozilla/firefox))|\.env)\b"
         ),
         rule!(
-            "AG072",
-            Severity::Medium,
+            "AG072", 50, false,
             "Exfiltration via curl POST to external host",
             "curl with --data/-d or -F targeting an external host from a PKGBUILD can leak data.",
             r"curl\s+(?:-[a-zA-Z]+\s+)*(?:-X\s+POST|--data\b|-d\s|-F\s)\s*[^\n;&|]*https?://"

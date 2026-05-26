@@ -1,5 +1,5 @@
 use crate::patterns::build_rules;
-use crate::report::{Finding, ScanResult, Severity};
+use crate::report::{self, Finding, ScanResult, Tier};
 use regex::Regex;
 use std::fs;
 use std::path::Path;
@@ -36,7 +36,8 @@ pub fn scan_text(content: &str, label: String) -> ScanResult {
             if let Some(m) = rule.regex.find(line) {
                 findings.push(Finding {
                     rule_id: rule.id,
-                    severity: rule.severity,
+                    points: rule.points,
+                    override_gate: rule.override_gate,
                     title: rule.title,
                     description: rule.description,
                     line: idx + 1,
@@ -49,12 +50,46 @@ pub fn scan_text(content: &str, label: String) -> ScanResult {
     findings.extend(check_skip_checksums(content));
     findings.extend(check_source_array(content));
 
-    findings.sort_by(|a, b| b.severity.cmp(&a.severity).then(a.line.cmp(&b.line)));
+    // Highest-impact findings first; override-gate before non-gate at equal points.
+    findings.sort_by(|a, b| {
+        b.override_gate
+            .cmp(&a.override_gate)
+            .then(b.points.cmp(&a.points))
+            .then(a.line.cmp(&b.line))
+    });
+
+    let (score, tier, gate) = report::score(&findings);
 
     ScanResult {
         path: label,
         findings,
         lines_scanned,
+        score,
+        tier,
+        override_gate_fired: gate,
+    }
+}
+
+/// Aggregate multiple per-package results into one synthetic ScanResult
+/// (used by the pacman hook prompt). Tier is the worst across inputs;
+/// score is the minimum trust observed.
+pub fn aggregate(results: &[(String, ScanResult)], label: String) -> ScanResult {
+    let findings: Vec<Finding> = results.iter().flat_map(|(_, r)| r.findings.clone()).collect();
+    let lines_scanned = results.iter().map(|(_, r)| r.lines_scanned).sum();
+    let tier = results
+        .iter()
+        .map(|(_, r)| r.tier)
+        .max()
+        .unwrap_or(Tier::Trusted);
+    let score = results.iter().map(|(_, r)| r.score).min().unwrap_or(100);
+    let gate = results.iter().find_map(|(_, r)| r.override_gate_fired);
+    ScanResult {
+        path: label,
+        findings,
+        lines_scanned,
+        score,
+        tier,
+        override_gate_fired: gate,
     }
 }
 
@@ -75,7 +110,8 @@ fn check_skip_checksums(content: &str) -> Vec<Finding> {
             let line = byte_offset_to_line(content, cap.get(0).unwrap().start());
             out.push(Finding {
                 rule_id: "AG080",
-                severity: Severity::High,
+                points: 50,
+                override_gate: false,
                 title: "All checksums are SKIP",
                 description: "The PKGBUILD disables integrity verification for ALL sources. Anyone who compromises the upstream server can swap the content without makepkg noticing.",
                 line,
@@ -101,7 +137,8 @@ fn check_source_array(content: &str) -> Vec<Finding> {
             if url_part.starts_with("http://") || url_part.starts_with("ftp://") {
                 out.push(Finding {
                     rule_id: "AG081",
-                    severity: Severity::Medium,
+                    points: 35,
+                    override_gate: false,
                     title: "Source over an unencrypted channel (http/ftp)",
                     description: "A plain HTTP/FTP source can be swapped by a network intermediary. Use HTTPS or git+https. If the source only exists over HTTP, demand a strict sha256/sha512 checksum.",
                     line,
@@ -111,7 +148,8 @@ fn check_source_array(content: &str) -> Vec<Finding> {
             if url_part.starts_with("git+http://") {
                 out.push(Finding {
                     rule_id: "AG082",
-                    severity: Severity::Medium,
+                    points: 35,
+                    override_gate: false,
                     title: "git repository over unencrypted HTTP",
                     description: "git+http does not authenticate the server. Use git+https or git+ssh.",
                     line,

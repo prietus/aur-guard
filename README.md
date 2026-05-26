@@ -23,8 +23,8 @@ optionally as a second layer right before pacman installs the package.
    them in the known AUR-helper caches, and lets you abort the transaction.
 
 Both checkpoints prompt for **interactive confirmation** over `/dev/tty` when
-there are high- or critical-severity findings. With no interactive terminal,
-they block by default (unless `AUR_GUARD_ASSUME=yes`).
+the scan lands at tier `SUSPICIOUS` or worse (see *Scoring model* below). With
+no interactive terminal, they block by default (unless `AUR_GUARD_ASSUME=yes`).
 
 ## Install
 
@@ -48,10 +48,13 @@ sudo ./install.sh uninstall    # remove binary, shim and hook
 ```bash
 aur-guard scan PKGBUILD             # scan and print findings
 aur-guard scan /path/to/package/    # finds PKGBUILD inside the directory
-aur-guard check PKGBUILD            # same scan; exit 0 if clean, 2 with findings
-aur-guard check --threshold critical PKGBUILD
+aur-guard check PKGBUILD            # exit 0 below threshold, 2 at or above
+aur-guard check --threshold malicious PKGBUILD   # only block on tier MALICIOUS
 aur-guard rules                     # list every active rule
 ```
+
+`check` defaults to `--threshold suspicious`. Valid thresholds:
+`trusted | ok | sketchy | suspicious | malicious`.
 
 Once the shim is installed the flow is transparent:
 
@@ -59,9 +62,34 @@ Once the shim is installed the flow is transparent:
 yay -S some-aur-package
 # → paru/yay clones and calls makepkg
 # → the shim invokes aur-guard, which scans the PKGBUILD
-# → on high/critical findings it asks for confirmation and aborts on "no"
-# → if clean, it execs the real makepkg
+# → tier SUSPICIOUS or worse → confirmation prompt, abort on "no"
+# → otherwise it execs the real makepkg
 ```
+
+## Scoring model
+
+Every scan ends with one of five tiers and a **trust score 0–100** (higher is
+safer):
+
+| Tier | Trust | Decision (shim / hook) |
+|---|---|---|
+| `TRUSTED` | 90–100 | runs silently |
+| `OK` | 70–89 | runs silently |
+| `SKETCHY` | 50–69 | prints findings, **no prompt** |
+| `SUSPICIOUS` | 25–49 | prints findings, **prompts** |
+| `MALICIOUS` | 0–24 | prints findings, **prompts** |
+
+Each rule contributes a number of *risk points*. Total risk is the sum of
+points (capped at 100); trust is `100 − risk`. A handful of rules are
+**override gates**: a single match forces the result to `MALICIOUS` regardless
+of the cumulative score. The gates are unambiguous indicators of malice —
+`curl … | bash`, classic reverse shells, `rm -rf /`, fork bomb, `base64 -d |
+bash`, etc. — and they are marked with `⛔gate` in `aur-guard rules`.
+
+Per-finding badges (`[CRITICAL]`, `[HIGH]`, `[MEDIUM]`, `[LOW]`) are a display
+shorthand derived from the rule's points; they describe *how heavy a single
+match is*, not the overall verdict. The tier on the first output line is what
+the shim and hook actually decide on.
 
 ## Integration with AUR helpers
 
@@ -118,12 +146,14 @@ each build. In `~/.config/paru/paru.conf` (or `/etc/paru.conf`):
 
 ```ini
 [bin]
-PreBuildCommand = /usr/local/bin/aur-guard check --threshold high .
+PreBuildCommand = /usr/local/bin/aur-guard check --threshold malicious .
 ```
 
 `PreBuildCommand` is treated as a gate by paru: if it exits non-zero, paru
-aborts the build. Using `check --threshold high` is recommended in this slot
-because there is no interactive prompt — the exit code decides.
+aborts the build. Because there is no interactive prompt in this slot, pick a
+threshold deliberately: `malicious` only blocks on tier `MALICIOUS` (override
+gate fired or score ≤ 24); use `suspicious` if you want to fail on borderline
+PKGBUILDs too.
 
 **yay** does not expose a pre-build hook. With yay, stick to the PATH shim, or
 use the two-step flow:
@@ -170,22 +200,23 @@ the post-build audit.
 
 ## Rules
 
-30 rules grouped into families. Run `aur-guard rules` for the full list.
+32 detection rules — 29 regex-based (visible in `aur-guard rules`) plus 3
+PKGBUILD-metadata checks built into the scanner. Grouped by family:
 
-| Family | Covers |
-|---|---|
-| AG001–AG004 | Remote content execution (`curl|bash`, `bash <(curl)`, `eval $(curl)`, `source URL`) |
-| AG010–AG013 | Reverse shells (nc -e, `/dev/tcp`, python, perl) |
-| AG020–AG023 | Destructive commands (`rm -rf /`, `dd` to disk, `mkfs`, fork bomb) |
-| AG030–AG034 | Persistence (authorized_keys, .bashrc, crontab, systemd, useradd) |
-| AG040–AG042 | Privilege escalation (sudo in PKGBUILD, suid, setcap) |
-| AG050–AG052 | Obfuscation (base64, xxd, huge base64 strings) |
-| AG060–AG062 | Suspicious network (literal IPs, URL shorteners, tunnels) |
-| AG070–AG072 | Credential / wallet access and exfiltration |
-| AG080–AG082 | PKGBUILD metadata (SKIP checksums, http / git+http sources) |
+| Family | Covers | Gates |
+|---|---|---|
+| AG001–AG004 | Remote content execution (`curl|bash`, `bash <(curl)`, `eval $(curl)`, `source URL`) | AG001-003 |
+| AG010–AG013 | Reverse shells (nc -e, `/dev/tcp`, python, perl) | AG010-011 |
+| AG020–AG023 | Destructive commands (`rm -rf /`, `dd` to disk, `mkfs`, fork bomb) | all |
+| AG030–AG034 | Persistence (authorized_keys, .bashrc, crontab, systemd, useradd) | — |
+| AG040–AG042 | Privilege escalation (sudo in PKGBUILD, suid, setcap) | — |
+| AG050–AG052 | Obfuscation (base64, xxd, huge base64 strings) | AG050-051 |
+| AG060–AG062 | Suspicious network (literal IPs, URL shorteners, tunnels) | — |
+| AG070–AG072 | Credential / wallet access and exfiltration | — |
+| AG080–AG082 | PKGBUILD metadata (SKIP checksums, http / git+http sources) | — |
 
-Severities are `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`. By default the shim asks
-for confirmation when at least one finding is ≥HIGH.
+Rules marked as gates force the result to tier `MALICIOUS` on a single match.
+The rest accumulate points into the trust score (see *Scoring model*).
 
 ## Limitations
 
@@ -204,16 +235,27 @@ for confirmation when at least one finding is ≥HIGH.
 
 ## Adding rules
 
-Edit `src/patterns.rs` and add a `rule!(id, severity, title, description,
-regex)` entry. If the regex needs to match quote characters, use hash raw
-strings (`r#"…"#`) rather than `r"…"`.
+Edit `src/patterns.rs` and add a `rule!(id, points, override_gate, title,
+description, regex)` entry:
+
+- `points`: how much risk the rule contributes (0–100). Roughly: 30 = mild
+  smell, 50 = significant, 75 = strong signal, 95 = essentially proof.
+- `override_gate`: set to `true` only for unambiguous indicators of malice —
+  one match alone should be enough to declare the package `MALICIOUS`.
+
+If the regex needs to match quote characters, use hash raw strings (`r#"…"#`)
+rather than `r"…"`.
 
 Test with:
 
 ```bash
 cargo build --release
 ./target/release/aur-guard scan test-fixtures/PKGBUILD.malicious
+./target/release/aur-guard scan test-fixtures/PKGBUILD.benign
 ```
+
+Expected: malicious lands at `MALICIOUS` (trust 0/100, override gate fired),
+benign at `TRUSTED` (trust 100/100, no findings).
 
 ## License
 
