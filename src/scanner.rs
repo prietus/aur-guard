@@ -118,7 +118,11 @@ pub fn scan_text(content: &str, label: String) -> ScanResult {
         lines_scanned += 1;
         // We do not skip comment lines: a commented-out payload is still worth flagging.
         for rule in &rules {
-            if let Some(m) = rule.regex.find(line) {
+            if rule.regex.is_match(line) {
+                // Snippet is the full source line (trimmed + truncated) rather
+                // than just the regex match. Gives the user enough context to
+                // tell at a glance whether the hit is a real command or e.g. a
+                // help-text mention inside a heredoc.
                 findings.push(Finding {
                     rule_id: rule.id,
                     points: rule.points,
@@ -126,7 +130,7 @@ pub fn scan_text(content: &str, label: String) -> ScanResult {
                     title: rule.title,
                     description: rule.description,
                     line: idx + 1,
-                    snippet: truncate(m.as_str(), 240),
+                    snippet: truncate(line.trim(), 240),
                     source_file: None,
                     is_new: false,
                 });
@@ -193,7 +197,9 @@ pub fn aggregate(results: &[(String, ScanResult)], label: String) -> ScanResult 
 }
 
 fn check_skip_checksums(content: &str) -> Vec<Finding> {
-    let mut out = Vec::new();
+    // Fire at most once per scan: even when several `sha256sums_<arch>=` arrays
+    // are all-SKIP, "integrity verification is disabled" is a single property
+    // of the PKGBUILD, not something that compounds per architecture.
     for cap in sums_re().captures_iter(content) {
         let inside = &cap[1];
         let entries: Vec<&str> = inside
@@ -204,23 +210,25 @@ fn check_skip_checksums(content: &str) -> Vec<Finding> {
         if entries.is_empty() {
             continue;
         }
-        let all_skip = entries.iter().all(|s| s.eq_ignore_ascii_case("SKIP"));
-        if all_skip {
+        if entries.iter().all(|s| s.eq_ignore_ascii_case("SKIP")) {
             let line = byte_offset_to_line(content, cap.get(0).unwrap().start());
-            out.push(Finding {
+            return vec![Finding {
                 rule_id: "AG080",
                 points: 50,
                 override_gate: false,
                 title: "All checksums are SKIP",
                 description: "The PKGBUILD disables integrity verification for ALL sources. Anyone who compromises the upstream server can swap the content without makepkg noticing.",
                 line,
-                snippet: truncate(cap.get(0).unwrap().as_str().lines().next().unwrap_or(""), 240),
+                snippet: truncate(
+                    cap.get(0).unwrap().as_str().lines().next().unwrap_or(""),
+                    240,
+                ),
                 source_file: None,
                 is_new: false,
-            });
+            }];
         }
     }
-    out
+    Vec::new()
 }
 
 fn check_source_array(content: &str) -> Vec<Finding> {
