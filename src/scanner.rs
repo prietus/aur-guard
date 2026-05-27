@@ -1,9 +1,47 @@
 use crate::patterns::build_rules;
 use crate::report::{self, Finding, ScanResult, Tier};
+use crate::rpc::MetaRule;
 use regex::Regex;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+
+/// Non-regex rules implemented as dedicated `check_*` functions below.
+/// Listed here so `aur-guard rules` can surface them alongside the regex
+/// rule set. Keep in lockstep with the actual checks.
+pub fn metadata_rules() -> &'static [MetaRule] {
+    const META: &[MetaRule] = &[
+        MetaRule {
+            id: "AG080",
+            points: 50,
+            override_gate: false,
+            title: "All checksums are SKIP",
+            description: "The PKGBUILD disables integrity verification for ALL sources.",
+        },
+        MetaRule {
+            id: "AG081",
+            points: 35,
+            override_gate: false,
+            title: "Source over an unencrypted channel (http/ftp)",
+            description: "A plain HTTP/FTP source can be swapped by a network intermediary.",
+        },
+        MetaRule {
+            id: "AG082",
+            points: 35,
+            override_gate: false,
+            title: "git repository over unencrypted HTTP",
+            description: "git+http does not authenticate the server.",
+        },
+        MetaRule {
+            id: "AG083",
+            points: 50,
+            override_gate: false,
+            title: "Source domain does not match declared upstream URL",
+            description: "Classic impersonation pattern in malicious -bin packages.",
+        },
+    ];
+    META
+}
 
 static SUMS_RE: OnceLock<Regex> = OnceLock::new();
 static SOURCE_RE: OnceLock<Regex> = OnceLock::new();
@@ -112,10 +150,11 @@ pub fn scan_text(content: &str, label: String) -> ScanResult {
         tier,
         override_gate_fired: gate,
         promoted_by_diff: None,
+        reputation: None,
     }
 }
 
-fn sort_findings(findings: &mut [Finding]) {
+pub(crate) fn sort_findings(findings: &mut [Finding]) {
     // Highest-impact findings first; new findings boosted to the top within
     // a tier so supply-chain changes are visible immediately.
     findings.sort_by(|a, b| {
@@ -149,6 +188,7 @@ pub fn aggregate(results: &[(String, ScanResult)], label: String) -> ScanResult 
         tier,
         override_gate_fired: gate,
         promoted_by_diff: promoted,
+        reputation: None,
     }
 }
 

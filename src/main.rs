@@ -1,6 +1,7 @@
 mod diff;
 mod patterns;
 mod report;
+mod rpc;
 mod scanner;
 mod ui;
 
@@ -42,6 +43,9 @@ enum Cmd {
         /// Skip the supply-chain diff against the cached previous version.
         #[arg(long)]
         no_diff: bool,
+        /// Skip the AUR RPC reputation lookup (no network).
+        #[arg(long)]
+        no_network: bool,
     },
     /// Same as `scan` but the exit code reflects the result (0 below threshold, 2 at or above).
     Check {
@@ -55,6 +59,9 @@ enum Cmd {
         /// Skip the supply-chain diff against the cached previous version.
         #[arg(long)]
         no_diff: bool,
+        /// Skip the AUR RPC reputation lookup (no network).
+        #[arg(long)]
+        no_network: bool,
     },
     /// makepkg wrapper: scan the PKGBUILD in the cwd and, if the result is
     /// concerning, ask for interactive confirmation. On accept, exec the real
@@ -87,8 +94,10 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<ExitCode> {
     match cli.cmd {
-        Cmd::Scan { path, plain, no_diff } => cmd_scan(path, plain, no_diff),
-        Cmd::Check { path, plain, threshold, no_diff } => cmd_check(path, plain, &threshold, no_diff),
+        Cmd::Scan { path, plain, no_diff, no_network } => cmd_scan(path, plain, no_diff, no_network),
+        Cmd::Check { path, plain, threshold, no_diff, no_network } => {
+            cmd_check(path, plain, &threshold, no_diff, no_network)
+        }
         Cmd::MakepkgWrap { real, args } => cmd_makepkg_wrap(real, args),
         Cmd::PacmanHook => cmd_pacman_hook(),
         Cmd::Rules => cmd_rules(),
@@ -107,29 +116,39 @@ fn resolve_pkgbuild(path: &Path) -> Result<PathBuf> {
 }
 
 /// One-stop scan used by every CLI path. Scans the PKGBUILD + adjacent
-/// `*.install` scriptlets, and (unless disabled) diffs against the cached
-/// previous PKGBUILD content to mark new findings and escalate tier.
-fn full_scan(path: &Path, with_diff: bool) -> Result<ScanResult> {
+/// `*.install` scriptlets, optionally diffs against the cached previous
+/// version, and optionally enriches with AUR RPC reputation data.
+fn full_scan(path: &Path, with_diff: bool, with_network: bool) -> Result<ScanResult> {
     let mut result = scanner::scan_pkgbuild_bundle(path)
         .with_context(|| format!("reading {}", path.display()))?;
 
+    let current = std::fs::read_to_string(path).unwrap_or_default();
+    let pkgname = diff::pkgname_from(&current);
+
     if with_diff {
-        let current = std::fs::read_to_string(path).unwrap_or_default();
-        if let Some(pkgname) = diff::pkgname_from(&current) {
-            if let Some(prev) = diff::load_previous(&pkgname) {
+        if let Some(name) = &pkgname {
+            if let Some(prev) = diff::load_previous(name) {
                 diff::mark_new_findings(&mut result.findings, &prev, &current);
                 diff::escalate_tier(&mut result);
             }
-            let _ = diff::save_current(&pkgname, &current);
+            let _ = diff::save_current(name, &current);
+        }
+    }
+
+    if with_network && !rpc::network_disabled() {
+        if let Some(name) = &pkgname {
+            if let Some(info) = rpc::fetch(name) {
+                rpc::apply(&mut result, name, &info);
+            }
         }
     }
 
     Ok(result)
 }
 
-fn cmd_scan(path: PathBuf, plain: bool, no_diff: bool) -> Result<ExitCode> {
+fn cmd_scan(path: PathBuf, plain: bool, no_diff: bool, no_network: bool) -> Result<ExitCode> {
     let path = resolve_pkgbuild(&path)?;
-    let result = full_scan(&path, !no_diff)?;
+    let result = full_scan(&path, !no_diff, !no_network)?;
     let color = !plain && ui::use_color();
     ui::print_result(&result, color);
     Ok(if result.is_clean() {
@@ -147,10 +166,16 @@ fn parse_threshold(s: &str) -> Result<Tier> {
     })
 }
 
-fn cmd_check(path: PathBuf, plain: bool, threshold: &str, no_diff: bool) -> Result<ExitCode> {
+fn cmd_check(
+    path: PathBuf,
+    plain: bool,
+    threshold: &str,
+    no_diff: bool,
+    no_network: bool,
+) -> Result<ExitCode> {
     let thr = parse_threshold(threshold)?;
     let path = resolve_pkgbuild(&path)?;
-    let result = full_scan(&path, !no_diff)?;
+    let result = full_scan(&path, !no_diff, !no_network)?;
     let color = !plain && ui::use_color();
     ui::print_result(&result, color);
     Ok(if result.tier >= thr {
@@ -169,7 +194,7 @@ fn cmd_makepkg_wrap(real: PathBuf, args: Vec<String>) -> Result<ExitCode> {
         return exec_real(&real, &args);
     }
 
-    let result = full_scan(&pkgbuild, true)?;
+    let result = full_scan(&pkgbuild, true, true)?;
     let color = ui::use_color();
     ui::print_result(&result, color);
     write_log(&result);
@@ -229,7 +254,7 @@ fn cmd_pacman_hook() -> Result<ExitCode> {
 
     for name in &aur_targets {
         if let Some(pkgbuild) = find_pkgbuild(name, &caches) {
-            match full_scan(&pkgbuild, true) {
+            match full_scan(&pkgbuild, true, true) {
                 Ok(r) => scanned.push((name.clone(), r)),
                 Err(e) => {
                     eprintln!("aur-guard :: error scanning {}: {e}", pkgbuild.display());
@@ -296,20 +321,39 @@ fn tier_index(t: Tier) -> usize {
 }
 
 fn cmd_rules() -> Result<ExitCode> {
-    let rules = patterns::build_rules();
+    let regex_rules = patterns::build_rules();
+    let meta_rules = scanner::metadata_rules();
+    let rep_rules = rpc::reputation_rules();
     let color = ui::use_color();
-    eprintln!("aur-guard :: {} active rules", rules.len());
-    for r in rules {
-        let sev = report::Severity::from_points(r.points, r.override_gate);
-        let badge = if color {
-            format!("{}[{}]\x1b[0m", sev.color(), sev.label())
-        } else {
-            format!("[{}]", sev.label())
-        };
-        let gate = if r.override_gate { " ⛔gate" } else { "      " };
-        println!("{badge:18}  {}  {:>2}pts {}  {}", r.id, r.points, gate, r.title);
+    let total = regex_rules.len() + meta_rules.len() + rep_rules.len();
+    eprintln!(
+        "aur-guard :: {} active rules ({} regex + {} metadata + {} reputation)",
+        total,
+        regex_rules.len(),
+        meta_rules.len(),
+        rep_rules.len(),
+    );
+    for r in regex_rules {
+        print_rule(color, r.id, r.points, r.override_gate, r.title);
+    }
+    for r in meta_rules {
+        print_rule(color, r.id, r.points, r.override_gate, r.title);
+    }
+    for r in rep_rules {
+        print_rule(color, r.id, r.points, r.override_gate, r.title);
     }
     Ok(ExitCode::from(0))
+}
+
+fn print_rule(color: bool, id: &str, points: u32, override_gate: bool, title: &str) {
+    let sev = report::Severity::from_points(points, override_gate);
+    let badge = if color {
+        format!("{}[{}]\x1b[0m", sev.color(), sev.label())
+    } else {
+        format!("[{}]", sev.label())
+    };
+    let gate = if override_gate { " ⛔gate" } else { "      " };
+    println!("{badge:18}  {}  {:>2}pts {}  {}", id, points, gate, title);
 }
 
 // --- utilities ---

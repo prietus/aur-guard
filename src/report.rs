@@ -131,6 +131,19 @@ impl Finding {
     }
 }
 
+/// AUR community/reputation snapshot, attached when a scan succeeds in
+/// retrieving RPC info for the package. Purely informational; the actual
+/// rule decisions live as AG09x findings.
+#[derive(Debug, Clone)]
+pub struct Reputation {
+    pub maintainer: Option<String>,
+    pub first_submitted: i64,
+    pub last_modified: i64,
+    pub num_votes: u32,
+    pub popularity: f64,
+    pub out_of_date: Option<i64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ScanResult {
     pub path: String,
@@ -144,6 +157,9 @@ pub struct ScanResult {
     /// Set when the diff layer promoted the tier because of a newly-introduced
     /// finding. Holds a short human-readable explanation.
     pub promoted_by_diff: Option<String>,
+    /// AUR RPC snapshot — `None` if no lookup happened (offline, package not
+    /// in AUR, network failure).
+    pub reputation: Option<Reputation>,
 }
 
 impl ScanResult {

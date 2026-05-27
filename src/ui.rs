@@ -1,6 +1,7 @@
-use crate::report::ScanResult;
+use crate::report::{Reputation, ScanResult};
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, IsTerminal, Write};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn use_color() -> bool {
     std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none()
@@ -42,6 +43,10 @@ pub fn print_result(result: &ScanResult, color: bool) {
             "  {yellow}→ supply-chain diff: {}{reset}",
             reason
         );
+    }
+    if let Some(rep) = &result.reputation {
+        let cyan = if color { "\x1b[36m" } else { "" };
+        eprintln!("  {cyan}→ AUR: {}{reset}", format_reputation(rep));
     }
 
     if result.is_clean() {
@@ -139,6 +144,32 @@ fn is_yes(input: &str) -> bool {
     matches!(t.as_str(), "y" | "yes")
 }
 
+fn format_reputation(rep: &Reputation) -> String {
+    let m = rep.maintainer.as_deref().unwrap_or("(orphaned)");
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let age = days_since(now, rep.first_submitted);
+    let last = days_since(now, rep.last_modified);
+    let mut out = format!(
+        "maintainer={m}, age={age}d, last update={last}d ago, votes={}, popularity={:.2}",
+        rep.num_votes, rep.popularity
+    );
+    if let Some(ts) = rep.out_of_date {
+        let ood = days_since(now, ts);
+        out.push_str(&format!(", ⚑ out-of-date {ood}d"));
+    }
+    out
+}
+
+fn days_since(now: i64, ts: i64) -> i64 {
+    if ts <= 0 {
+        return -1;
+    }
+    (now - ts).max(0) / 86_400
+}
+
 pub fn append_log(path: &str, result: &ScanResult) {
     let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) else {
         return;
@@ -146,9 +177,14 @@ pub fn append_log(path: &str, result: &ScanResult) {
     let ts = unix_timestamp();
     let gate = result.override_gate_fired.unwrap_or("-");
     let promoted = result.promoted_by_diff.as_deref().unwrap_or("-");
+    let rep = result
+        .reputation
+        .as_ref()
+        .map(format_reputation)
+        .unwrap_or_else(|| "-".to_string());
     let _ = writeln!(
         f,
-        "{ts} target={} lines={} tier={} score={} findings={} gate={} promoted={:?}",
+        "{ts} target={} lines={} tier={} score={} findings={} gate={} promoted={:?} aur={:?}",
         result.path,
         result.lines_scanned,
         result.tier.label(),
@@ -156,6 +192,7 @@ pub fn append_log(path: &str, result: &ScanResult) {
         result.findings.len(),
         gate,
         promoted,
+        rep,
     );
     for x in &result.findings {
         let src = x.source_file.as_deref().unwrap_or("PKGBUILD");

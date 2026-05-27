@@ -51,6 +51,7 @@ aur-guard scan /path/to/package/    # finds PKGBUILD inside the directory
 aur-guard check PKGBUILD            # exit 0 below threshold, 2 at or above
 aur-guard check --threshold malicious PKGBUILD   # only block on tier MALICIOUS
 aur-guard scan --no-diff PKGBUILD   # skip supply-chain diff (don't read/write history cache)
+aur-guard scan --no-network PKGBUILD # skip AUR RPC reputation lookup
 aur-guard rules                     # list every active rule
 ```
 
@@ -124,6 +125,39 @@ the override-gate line so you can see *why* the tier went up.
 
 Bypass the diff with `--no-diff` (for one-off scans, CI, etc.). The pacman
 hook and the makepkg shim always use it.
+
+### AUR reputation enrichment
+
+When a scan can resolve a `pkgname` (or `pkgbase`) and network access is
+allowed, aur-guard queries the AUR RPC v5 endpoint
+(`https://aur.archlinux.org/rpc/v5/info`) to retrieve the package's current
+maintainer, submission date, last-modified date, vote count and popularity.
+The result is shown as a one-line banner directly under the trust score:
+
+```
+→ AUR: maintainer=Morganamilo, age=2046d, last update=166d ago, votes=1197, popularity=30.25
+```
+
+The reputation snapshot also drives five rules (AG090–AG094 — see *Rules*).
+The most important of them is **AG090 — maintainer changed since the
+previously seen version**: aur-guard keeps a per-package log of every
+maintainer it has ever seen in
+`~/.cache/aur-guard/rpc/maintainer-history/<pkgname>.txt`. If the AUR record
+on the next scan reports a different maintainer, AG090 fires (75 points,
+typically promoting the tier to `SUSPICIOUS`). Transfer-of-ownership is one
+of the top supply-chain attack vectors in package ecosystems, and this is
+the single best signal that a previously-trusted package may no longer be
+the same project you trusted before.
+
+Network behaviour:
+
+- Timeout: 3 seconds (fail-open — if the RPC is unreachable, the scan
+  continues without the reputation block).
+- Cache TTL: 1 hour. Repeated scans of the same package hit the local cache.
+- Disable per-invocation with `--no-network` (`scan` / `check`), or globally
+  with `AUR_GUARD_OFFLINE=1`. The PKGBUILD smoke tests for `aur-guard-git`
+  use `--no-network` because the build chroot has no network access during
+  `check()`.
 
 ## Integration with AUR helpers
 
@@ -231,12 +265,15 @@ the post-build audit.
 | `AUR_GUARD_BIN` | Path to the `aur-guard` binary used by the shim (default `/usr/local/bin/aur-guard`). |
 | `AUR_GUARD_CACHE_DIRS` | Colon-separated list of extra directories where the pacman hook should look for PKGBUILDs. |
 | `AUR_GUARD_HISTORY_DIR` | Override the supply-chain history cache directory (default `$XDG_CACHE_HOME/aur-guard/pkgbuild-history` or the equivalent under the invoking user's `~/.cache/`). |
+| `AUR_GUARD_OFFLINE=1` | Disable the AUR RPC reputation lookup globally (equivalent to passing `--no-network` on every invocation). |
+| `AUR_GUARD_RPC_DIR` | Override the AUR RPC cache directory (default `$XDG_CACHE_HOME/aur-guard/rpc` or the equivalent under the invoking user's `~/.cache/`). |
 | `NO_COLOR=1` | Disable coloured output. |
 
 ## Rules
 
-33 detection rules — 29 regex-based (visible in `aur-guard rules`) plus 4
-PKGBUILD-metadata checks built into the scanner. Grouped by family:
+38 detection rules — 29 regex-based, 4 PKGBUILD-metadata checks, and 5
+reputation rules backed by the AUR RPC. All are listed by `aur-guard rules`.
+Grouped by family:
 
 | Family | Covers | Gates |
 |---|---|---|
@@ -249,6 +286,7 @@ PKGBUILD-metadata checks built into the scanner. Grouped by family:
 | AG060–AG062 | Suspicious network (literal IPs, URL shorteners, tunnels) | — |
 | AG070–AG072 | Credential / wallet access and exfiltration | — |
 | AG080–AG083 | PKGBUILD provenance (SKIP checksums, http / git+http sources, `url=` ↔ `source=()` mismatch) | — |
+| AG090–AG094 | AUR reputation (maintainer change, orphan, newly submitted, flagged out-of-date, low engagement) | — |
 
 Rules marked as gates force the result to tier `MALICIOUS` on a single match.
 The rest accumulate points into the trust score (see *Scoring model*).
