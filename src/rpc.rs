@@ -13,10 +13,13 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::report::{Finding, Reputation, ScanResult};
+use crate::report::{Finding, MaintainerSummary, Reputation, ScanResult};
 
 const AUR_RPC_URL: &str = "https://aur.archlinux.org/rpc/v5/info";
+const AUR_SEARCH_URL: &str = "https://aur.archlinux.org/rpc/v5/search";
 const CACHE_TTL_SECS: u64 = 3600;
+/// Per-maintainer track records change slowly; an aggressive TTL is fine.
+const MAINTAINER_CACHE_TTL_SECS: u64 = 86_400;
 const NET_TIMEOUT_SECS: u64 = 3;
 
 /// Static description of a non-regex rule. Used by `cmd rules` to list the
@@ -97,8 +100,6 @@ pub struct AurInfo {
 
 #[derive(Debug, Deserialize)]
 struct AurResponse {
-    #[serde(rename = "type")]
-    response_type: String,
     #[serde(default)]
     results: Vec<AurInfo>,
 }
@@ -133,6 +134,119 @@ fn rpc_cache_path(pkgname: &str) -> Option<PathBuf> {
 
 fn maintainer_log_path(pkgname: &str) -> Option<PathBuf> {
     cache_root().map(|d| d.join("maintainer-history").join(format!("{pkgname}.txt")))
+}
+
+fn maintainer_summary_cache_path(name: &str) -> Option<PathBuf> {
+    cache_root().map(|d| d.join("maintainer-summary").join(format!("{name}.json")))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MaintainerSummaryDisk {
+    package_count: u32,
+    total_votes: u32,
+    oldest_first_submitted: i64,
+}
+
+impl From<MaintainerSummaryDisk> for MaintainerSummary {
+    fn from(d: MaintainerSummaryDisk) -> Self {
+        MaintainerSummary {
+            package_count: d.package_count,
+            total_votes: d.total_votes,
+            oldest_first_submitted: d.oldest_first_submitted,
+        }
+    }
+}
+
+impl From<&MaintainerSummary> for MaintainerSummaryDisk {
+    fn from(s: &MaintainerSummary) -> Self {
+        MaintainerSummaryDisk {
+            package_count: s.package_count,
+            total_votes: s.total_votes,
+            oldest_first_submitted: s.oldest_first_submitted,
+        }
+    }
+}
+
+/// Decide if a maintainer's overall AUR track record is enough to suppress
+/// the per-package newness / engagement flags.
+///
+/// Established if EITHER:
+///   (a) they've been on AUR for ≥180 days AND maintain ≥2 packages, OR
+///   (b) their packages have ≥10 votes total.
+///
+/// The second branch catches single-package maintainers whose one package
+/// has clearly been vetted by the community. The first branch catches the
+/// long-tail of low-popularity-but-old contributors.
+fn is_established(s: &MaintainerSummary) -> bool {
+    let now = current_unix();
+    let oldest_age_days = if s.oldest_first_submitted > 0 {
+        (now - s.oldest_first_submitted).max(0) / 86_400
+    } else {
+        0
+    };
+    (oldest_age_days >= 180 && s.package_count >= 2) || s.total_votes >= 10
+}
+
+/// Fetch the maintainer's package list from AUR RPC search, cached on disk
+/// for 24h. Returns `None` on any failure (offline, parse error, unknown
+/// maintainer). Like the per-package lookup, this is strictly fail-open.
+pub fn fetch_maintainer_summary(name: &str) -> Option<MaintainerSummary> {
+    if let Some(cached) = load_maintainer_summary_cache(name) {
+        return Some(cached);
+    }
+    let summary = fetch_maintainer_summary_remote(name)?;
+    let _ = store_maintainer_summary_cache(name, &summary);
+    Some(summary)
+}
+
+fn load_maintainer_summary_cache(name: &str) -> Option<MaintainerSummary> {
+    let path = maintainer_summary_cache_path(name)?;
+    let meta = fs::metadata(&path).ok()?;
+    let modified = meta.modified().ok()?;
+    let age = SystemTime::now().duration_since(modified).ok()?;
+    if age.as_secs() > MAINTAINER_CACHE_TTL_SECS {
+        return None;
+    }
+    let body = fs::read_to_string(&path).ok()?;
+    let disk: MaintainerSummaryDisk = serde_json::from_str(&body).ok()?;
+    Some(disk.into())
+}
+
+fn store_maintainer_summary_cache(name: &str, summary: &MaintainerSummary) -> std::io::Result<()> {
+    let Some(path) = maintainer_summary_cache_path(name) else { return Ok(()) };
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let disk: MaintainerSummaryDisk = summary.into();
+    let body = serde_json::to_string(&disk).map_err(std::io::Error::other)?;
+    fs::write(path, body)
+}
+
+fn fetch_maintainer_summary_remote(name: &str) -> Option<MaintainerSummary> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(NET_TIMEOUT_SECS))
+        .user_agent(concat!("aur-guard/", env!("CARGO_PKG_VERSION")))
+        .build();
+    let url = format!("{AUR_SEARCH_URL}/{name}");
+    let resp = agent.get(&url).query("by", "maintainer").call().ok()?;
+    let parsed: AurResponse = resp.into_json().ok()?;
+    if parsed.results.is_empty() {
+        return None;
+    }
+    let package_count = parsed.results.len() as u32;
+    let total_votes: u32 = parsed.results.iter().map(|p| p.num_votes).sum();
+    let oldest_first_submitted = parsed
+        .results
+        .iter()
+        .map(|p| p.first_submitted)
+        .filter(|&t| t > 0)
+        .min()
+        .unwrap_or(0);
+    Some(MaintainerSummary {
+        package_count,
+        total_votes,
+        oldest_first_submitted,
+    })
 }
 
 /// Fetch RPC info for `pkgname`. Uses the on-disk cache if fresh; otherwise
@@ -179,7 +293,7 @@ fn fetch_remote(pkgname: &str) -> Option<AurInfo> {
         .call()
         .ok()?;
     let parsed: AurResponse = resp.into_json().ok()?;
-    if parsed.response_type != "multiinfo" || parsed.results.is_empty() {
+    if parsed.results.is_empty() {
         return None;
     }
     let mut results = parsed.results;
@@ -193,7 +307,40 @@ fn fetch_remote(pkgname: &str) -> Option<AurInfo> {
 /// Apply reputation-derived findings to a scan result and attach the
 /// `Reputation` block for UI display. Recomputes score/tier afterwards so
 /// AG090..AG094 contribute to the overall verdict.
+///
+/// AG092 (newly submitted) and AG094 (low engagement) are suppressed when
+/// the package's maintainer is "established" per AUR RPC — i.e. they have
+/// a real track record on AUR (old account + multiple packages, or
+/// non-trivial vote count). Trust is derived, not declared: no config
+/// file, no list of humans, only observable AUR metrics. AG090/AG091/AG093
+/// fire regardless because they signal transfer-of-ownership / abandon
+/// events that matter even for established accounts.
 pub fn apply(result: &mut ScanResult, pkgname: &str, info: &AurInfo) {
+    // Snapshot the prior maintainer BEFORE we append the current one to the
+    // history file, otherwise the AG090 check below would compare against
+    // itself.
+    let prior_maintainer = info.maintainer.as_ref().and_then(|current_m| {
+        load_maintainer_history(pkgname)?
+            .last()
+            .cloned()
+            .filter(|prev| prev != current_m)
+    });
+
+    if let Some(current_m) = &info.maintainer {
+        let _ = append_maintainer_history(pkgname, current_m);
+    }
+
+    // Pull the maintainer's overall track record once per scan (cached 24h
+    // on disk). Used for the suppression decision AND for the banner.
+    let maintainer_summary = info
+        .maintainer
+        .as_deref()
+        .and_then(fetch_maintainer_summary);
+    let maintainer_established = maintainer_summary
+        .as_ref()
+        .map(is_established)
+        .unwrap_or(false);
+
     let now = current_unix();
     let mut new_findings: Vec<Finding> = Vec::new();
 
@@ -205,7 +352,7 @@ pub fn apply(result: &mut ScanResult, pkgname: &str, info: &AurInfo) {
     }
 
     let age_days = (now - info.first_submitted).max(0) / 86_400;
-    if info.first_submitted > 0 && age_days < 30 {
+    if !maintainer_established && info.first_submitted > 0 && age_days < 30 {
         new_findings.push(meta_finding(
             "AG092",
             format!("FirstSubmitted: {age_days} day(s) ago"),
@@ -220,35 +367,22 @@ pub fn apply(result: &mut ScanResult, pkgname: &str, info: &AurInfo) {
         ));
     }
 
-    if info.num_votes < 5 && info.popularity < 0.1 {
+    if !maintainer_established && info.num_votes < 5 && info.popularity < 0.1 {
         new_findings.push(meta_finding(
             "AG094",
             format!("votes={} popularity={:.3}", info.num_votes, info.popularity),
         ));
     }
 
-    // AG090 — maintainer transfer detection. Only fires when we have a
-    // recorded previous maintainer that differs from the current one. We
-    // always append the current maintainer to the log so a future scan can
-    // notice the change.
-    if let Some(current_m) = &info.maintainer {
-        if let Some(history) = load_maintainer_history(pkgname) {
-            if let Some(last) = history.last() {
-                if last != current_m {
-                    new_findings.push(meta_finding(
-                        "AG090",
-                        format!("previous={last} → current={current_m}"),
-                    ));
-                }
-            }
-        }
-        let _ = append_maintainer_history(pkgname, current_m);
+    if let (Some(prev), Some(current_m)) = (prior_maintainer, &info.maintainer) {
+        new_findings.push(meta_finding(
+            "AG090",
+            format!("previous={prev} → current={current_m}"),
+        ));
     }
 
     if !new_findings.is_empty() {
         result.findings.extend(new_findings);
-        // Reuse the scanner's canonical ordering so AUR findings land in the
-        // right place relative to regex/metadata findings.
         crate::scanner::sort_findings(&mut result.findings);
         let (s, t, g) = crate::report::score(&result.findings);
         result.score = s;
@@ -263,6 +397,8 @@ pub fn apply(result: &mut ScanResult, pkgname: &str, info: &AurInfo) {
         num_votes: info.num_votes,
         popularity: info.popularity,
         out_of_date: info.out_of_date,
+        maintainer_established,
+        maintainer_summary,
     });
 }
 

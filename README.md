@@ -159,6 +159,65 @@ Network behaviour:
   use `--no-network` because the build chroot has no network access during
   `check()`.
 
+#### Derived maintainer trust (no config)
+
+Trust is derived from the AUR record, not declared in a local file. When
+the per-package RPC lookup turns up a maintainer, aur-guard makes one
+extra call to `rpc/v5/search/<name>?by=maintainer` to aggregate the
+maintainer's full portfolio (oldest package age, total packages, total
+votes) and caches the result for 24 hours. The maintainer is considered
+**established** when EITHER:
+
+- their oldest AUR package is ≥180 days old AND they maintain ≥2
+  packages, OR
+- their packages have ≥10 total votes.
+
+For an established maintainer, **AG092 (newly submitted) and AG094 (low
+engagement)** are suppressed on the package being scanned — those rules
+only meaningfully fire on accounts with no track record. The banner gains
+an `(established maintainer)` tag and a sub-line shows the aggregate, e.g.
+
+```
+→ AUR: maintainer=Morganamilo, age=2046d, last update=166d ago, votes=1197, popularity=30.25 (established maintainer)
+  track record: 9 pkg(s) · 1680 vote(s) total · oldest 4886d ago — AG092/AG094 suppressed
+```
+
+AG090 (maintainer change), AG091 (orphaned), and AG093 (flagged
+out-of-date) keep firing regardless of how established the maintainer is
+— those are transfer / abandonment signals that matter even more for
+long-lived packages.
+
+Nothing to configure. The track record is observed, not asserted; an
+attacker creating a fresh AUR account cannot fake votes or age across
+multiple packages cheaply.
+
+### Verdict cache (short-lived)
+
+When you run `yay -S foo`, the AUR helper invokes `makepkg` three or four
+times during a single install (clone → verifysource → build → fakeroot
+package), and the pacman PreTransaction hook fires once more on top of
+that. Without dedup the same `SUSPICIOUS` y/N prompt would appear four
+times in a row.
+
+The makepkg shim and the pacman hook share a tiny cache at
+`~/.cache/aur-guard/verdicts/<sha256>.txt`, keyed by the SHA-256 of the
+**bundle** (PKGBUILD + every adjacent `*.install` + the running aur-guard
+version). When an identical bundle is scanned again within 5 minutes:
+
+- the shim prints `aur-guard :: identical PKGBUILD already accepted as X
+  Ys ago — skipping prompt` and exec's the real makepkg directly;
+- the hook prints a similar one-liner and skips the aggregate prompt.
+
+The verdict is only cached after an accepted scan (either user-confirmed
+or below the prompt threshold). Aborted scans are not cached, so a `n` at
+the prompt is repeated until you change the PKGBUILD.
+
+Any mutation of the PKGBUILD or any `.install` changes the hash, so an
+attacker cannot swap a scriptlet behind an already-confirmed PKGBUILD to
+slip past the prompt — the cache simply misses and you get a fresh scan.
+
+Override the cache directory with `AUR_GUARD_VERDICT_DIR=/path/to/dir`.
+
 ## Integration with AUR helpers
 
 aur-guard plugs into AUR helpers (paru, yay, pikaur, trizen, aurutils, …)
@@ -267,6 +326,7 @@ the post-build audit.
 | `AUR_GUARD_HISTORY_DIR` | Override the supply-chain history cache directory (default `$XDG_CACHE_HOME/aur-guard/pkgbuild-history` or the equivalent under the invoking user's `~/.cache/`). |
 | `AUR_GUARD_OFFLINE=1` | Disable the AUR RPC reputation lookup globally (equivalent to passing `--no-network` on every invocation). |
 | `AUR_GUARD_RPC_DIR` | Override the AUR RPC cache directory (default `$XDG_CACHE_HOME/aur-guard/rpc` or the equivalent under the invoking user's `~/.cache/`). |
+| `AUR_GUARD_VERDICT_DIR` | Override the verdict-cache directory used by the shim/hook to dedup repeat prompts (default `$XDG_CACHE_HOME/aur-guard/verdicts`). |
 | `NO_COLOR=1` | Disable coloured output. |
 
 ## Rules

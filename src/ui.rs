@@ -47,6 +47,9 @@ pub fn print_result(result: &ScanResult, color: bool) {
     if let Some(rep) = &result.reputation {
         let cyan = if color { "\x1b[36m" } else { "" };
         eprintln!("  {cyan}→ AUR: {}{reset}", format_reputation(rep));
+        if let Some(line) = format_maintainer_track_record(rep) {
+            eprintln!("  {dim}  {line}{reset}");
+        }
     }
 
     if result.is_clean() {
@@ -160,7 +163,30 @@ fn format_reputation(rep: &Reputation) -> String {
         let ood = days_since(now, ts);
         out.push_str(&format!(", ⚑ out-of-date {ood}d"));
     }
+    if rep.maintainer_established {
+        out.push_str(" (established maintainer)");
+    }
     out
+}
+
+/// Optional second line under the AUR banner: the maintainer's overall
+/// track record. Shown whenever we have a summary at all, and explicitly
+/// notes the AG092/AG094 suppression when established.
+fn format_maintainer_track_record(rep: &Reputation) -> Option<String> {
+    let s = rep.maintainer_summary.as_ref()?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let oldest_d = days_since(now, s.oldest_first_submitted);
+    let mut line = format!(
+        "track record: {} pkg(s) · {} vote(s) total · oldest {}d ago",
+        s.package_count, s.total_votes, oldest_d
+    );
+    if rep.maintainer_established {
+        line.push_str(" — AG092/AG094 suppressed");
+    }
+    Some(line)
 }
 
 fn days_since(now: i64, ts: i64) -> i64 {

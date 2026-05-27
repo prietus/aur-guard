@@ -4,6 +4,7 @@ mod report;
 mod rpc;
 mod scanner;
 mod ui;
+mod verdict_cache;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -194,6 +195,23 @@ fn cmd_makepkg_wrap(real: PathBuf, args: Vec<String>) -> Result<ExitCode> {
         return exec_real(&real, &args);
     }
 
+    // Verdict cache short-circuit: if this exact bundle (PKGBUILD + every
+    // adjacent .install) was scanned and accepted in the last 5 minutes,
+    // skip the prompt. yay/paru call makepkg three or four times per
+    // install, and re-prompting the user every single time turns into pure
+    // noise.
+    let bundle_hash = verdict_cache::bundle_hash(&pkgbuild);
+    if let Some(hash) = &bundle_hash {
+        if let Some(cached) = verdict_cache::load(hash) {
+            eprintln!(
+                "aur-guard :: identical PKGBUILD already accepted as {} {}s ago — skipping prompt.",
+                cached.tier.label(),
+                cached.age_secs()
+            );
+            return exec_real(&real, &args);
+        }
+    }
+
     let result = full_scan(&pkgbuild, true, true)?;
     let color = ui::use_color();
     ui::print_result(&result, color);
@@ -205,6 +223,9 @@ fn cmd_makepkg_wrap(real: PathBuf, args: Vec<String>) -> Result<ExitCode> {
         if result.tier == Tier::Sketchy {
             eprintln!("aur-guard :: tier SKETCHY; continuing without prompt.");
         }
+        if let Some(hash) = &bundle_hash {
+            let _ = verdict_cache::save(hash, result.tier);
+        }
         return exec_real(&real, &args);
     }
 
@@ -213,6 +234,9 @@ fn cmd_makepkg_wrap(real: PathBuf, args: Vec<String>) -> Result<ExitCode> {
         return Ok(ExitCode::from(1));
     }
     eprintln!("aur-guard :: user confirmed; continuing.");
+    if let Some(hash) = &bundle_hash {
+        let _ = verdict_cache::save(hash, result.tier);
+    }
     exec_real(&real, &args)
 }
 
@@ -296,6 +320,30 @@ fn cmd_pacman_hook() -> Result<ExitCode> {
         return Ok(ExitCode::from(0));
     }
 
+    // Verdict-cache short-circuit: when EVERY suspicious-or-worse target was
+    // accepted via the makepkg shim within the last 5 minutes, the hook has
+    // nothing to add — re-prompting the same y/n at this stage is pure
+    // noise. We still log/show the scan output above for transparency.
+    let suspicious_targets: Vec<&(String, ScanResult)> = scanned
+        .iter()
+        .filter(|(_, r)| r.tier >= Tier::Suspicious)
+        .collect();
+    let all_cached = !suspicious_targets.is_empty()
+        && suspicious_targets.iter().all(|(name, _)| {
+            find_pkgbuild(name, &caches)
+                .as_deref()
+                .and_then(verdict_cache::bundle_hash)
+                .and_then(|h| verdict_cache::load(&h))
+                .is_some()
+        });
+    if all_cached {
+        eprintln!(
+            "aur-guard :: {} concerning target(s) already accepted via the makepkg shim — skipping aggregate prompt.",
+            suspicious_targets.len()
+        );
+        return Ok(ExitCode::from(0));
+    }
+
     let synthetic = scanner::aggregate(
         &scanned,
         format!("{} AUR package(s)", scanned.len()),
@@ -303,6 +351,19 @@ fn cmd_pacman_hook() -> Result<ExitCode> {
 
     if ui::confirm_continue(&synthetic) {
         eprintln!("aur-guard :: continuing install at the user's discretion.");
+        // Cache the per-target verdicts so a subsequent identical run (e.g.
+        // user retrying a transaction) also short-circuits.
+        for (name, r) in &scanned {
+            if r.tier < Tier::Suspicious {
+                continue;
+            }
+            if let Some(hash) = find_pkgbuild(name, &caches)
+                .as_deref()
+                .and_then(verdict_cache::bundle_hash)
+            {
+                let _ = verdict_cache::save(&hash, r.tier);
+            }
+        }
         Ok(ExitCode::from(0))
     } else {
         eprintln!("aur-guard :: install aborted by user (PreTransaction hook).");

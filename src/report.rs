@@ -131,6 +131,18 @@ impl Finding {
     }
 }
 
+/// Aggregate of every package an AUR maintainer is responsible for. Used
+/// to decide whether they look "established" enough to suppress the
+/// per-package newness / low-engagement flags.
+#[derive(Debug, Clone)]
+pub struct MaintainerSummary {
+    pub package_count: u32,
+    pub total_votes: u32,
+    /// Unix timestamp of the oldest package by this maintainer (i.e. when
+    /// they first published anything to AUR). 0 if unknown.
+    pub oldest_first_submitted: i64,
+}
+
 /// AUR community/reputation snapshot, attached when a scan succeeds in
 /// retrieving RPC info for the package. Purely informational; the actual
 /// rule decisions live as AG09x findings.
@@ -142,6 +154,16 @@ pub struct Reputation {
     pub num_votes: u32,
     pub popularity: f64,
     pub out_of_date: Option<i64>,
+    /// True when the maintainer's overall AUR track record clears the
+    /// "established" threshold (see `rpc::is_established`). In that case
+    /// AG092 (newly submitted) and AG094 (low engagement) are suppressed
+    /// for *this* package, since they only meaningfully fire on accounts
+    /// with no history.
+    pub maintainer_established: bool,
+    /// Per-maintainer aggregate (oldest package age, total packages, total
+    /// votes) used both for the establishment check and for the banner
+    /// context line.
+    pub maintainer_summary: Option<MaintainerSummary>,
 }
 
 #[derive(Debug, Clone)]
