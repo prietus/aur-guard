@@ -15,6 +15,66 @@ fn paint(color: bool, code: &str, text: &str) -> String {
     }
 }
 
+/// Best-effort terminal width. Pacman/yay set `COLUMNS` for their hooks; we
+/// fall back to 100 columns when nothing is available, which renders fine
+/// in both interactive terminals and pacman's captured output.
+fn term_width() -> usize {
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|w| *w >= 40)
+        .unwrap_or(100)
+}
+
+/// Char-boundary-aware truncation with an ellipsis. `…` counts as one char.
+fn truncate_display(s: &str, max: usize) -> String {
+    let count = s.chars().count();
+    if count <= max {
+        return s.to_string();
+    }
+    let take = max.saturating_sub(1);
+    let mut out: String = s.chars().take(take).collect();
+    out.push('…');
+    out
+}
+
+/// Word-wrap a paragraph at `width` columns, prefixing every line with
+/// `indent`. Long single tokens (URLs, base64) that overflow the width are
+/// placed on their own line and then truncated to `width` so we never spill
+/// across the terminal.
+fn wrap_paragraph(text: &str, width: usize, indent: &str) -> String {
+    let indent_len = indent.chars().count();
+    let max_content = width.saturating_sub(indent_len).max(20);
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut current_len = 0usize;
+
+    for word in text.split_whitespace() {
+        let w_len = word.chars().count();
+        let candidate_len = if current_len == 0 { w_len } else { current_len + 1 + w_len };
+        if current_len > 0 && candidate_len > max_content {
+            lines.push(format!("{indent}{current}"));
+            current.clear();
+            current_len = 0;
+        }
+        if current_len > 0 {
+            current.push(' ');
+            current_len += 1;
+        }
+        if w_len > max_content {
+            current.push_str(&truncate_display(word, max_content));
+            current_len = max_content;
+        } else {
+            current.push_str(word);
+            current_len += w_len;
+        }
+    }
+    if !current.is_empty() {
+        lines.push(format!("{indent}{current}"));
+    }
+    lines.join("\n")
+}
+
 pub fn print_result(result: &ScanResult, color: bool) {
     let bold = if color { "\x1b[1m" } else { "" };
     let dim = if color { "\x1b[2m" } else { "" };
@@ -69,6 +129,11 @@ pub fn print_result(result: &ScanResult, color: bool) {
     }
     eprintln!();
 
+    let width = term_width();
+    // Reserve a small margin so wrap output fits even on narrow terminals.
+    let snippet_width = width.saturating_sub(14).max(40);
+    let desc_width = width.saturating_sub(4).max(60);
+
     for f in &result.findings {
         let sev = f.severity();
         let sev_color = if color { sev.color() } else { "" };
@@ -90,29 +155,51 @@ pub fn print_result(result: &ScanResult, color: bool) {
             f.points,
             gate_marker
         );
-        eprintln!("    {dim}line {}:{reset} {}", f.line, f.snippet.trim());
-        eprintln!("    {}", f.description);
+        let snippet = truncate_display(f.snippet.trim(), snippet_width);
+        eprintln!("    {dim}line {}:{reset} {}", f.line, snippet);
+        eprintln!("{}", wrap_paragraph(f.description, desc_width, "    "));
         eprintln!();
     }
 }
 
-/// Asks for confirmation over /dev/tty so the prompt works even when stdin/stdout
-/// are redirected (typical when invoked from a pacman hook or makepkg wrapper).
-pub fn confirm_continue(result: &ScanResult) -> bool {
-    let prompt = format!(
-        "aur-guard :: tier {} (trust {}/100), {} finding(s). Continue with the install? [y/N] ",
-        result.tier.label(),
-        result.score,
-        result.findings.len(),
-    );
+/// Visually-distinct y/N prompt. Renders a horizontal rule, a labelled
+/// header, the summary lines provided by the caller, and the question. The
+/// whole block goes to `/dev/tty` (bypassing pacman's captured stderr) so
+/// the prompt cannot get interleaved with earlier log output. Stderr is
+/// flushed first to make sure preceding eprintln output is visible.
+///
+/// Returns `true` on yes. On non-interactive use it honours
+/// `AUR_GUARD_ASSUME=yes`; otherwise it blocks by default.
+pub fn confirm(label: &str, summary: &[String], question: &str) -> bool {
+    let color = use_color();
+    let bold = if color { "\x1b[1m" } else { "" };
+    let reset = if color { "\x1b[0m" } else { "" };
+    let cyan = if color { "\x1b[1;36m" } else { "" };
 
-    // Try opening /dev/tty so we can talk to the user even when pacman/makepkg
-    // have captured stdin/stdout.
+    let rule_width = term_width().clamp(40, 72);
+    let rule = "━".repeat(rule_width);
+
+    let mut block = String::new();
+    block.push('\n');
+    block.push_str(&format!("{cyan}{rule}{reset}\n"));
+    block.push_str(&format!("  {bold}aur-guard :: {label}{reset}\n"));
+    for line in summary {
+        block.push_str(&format!("  ▸ {line}\n"));
+    }
+    block.push_str(&format!(
+        "  ▸ {bold}{question}{reset}  [y/N] "
+    ));
+
+    // Force any previously-buffered stderr (pacman wraps us in a pipe, so
+    // stderr is line-buffered to its capture) to drain before we touch the
+    // terminal directly.
+    let _ = std::io::stderr().flush();
+
     if let (Ok(mut tty_out), Ok(tty_in)) = (
         OpenOptions::new().write(true).open("/dev/tty"),
         OpenOptions::new().read(true).open("/dev/tty"),
     ) {
-        let _ = tty_out.write_all(prompt.as_bytes());
+        let _ = tty_out.write_all(block.as_bytes());
         let _ = tty_out.flush();
         let mut reader = BufReader::new(tty_in);
         let mut buf = String::new();
@@ -121,9 +208,8 @@ pub fn confirm_continue(result: &ScanResult) -> bool {
         }
     }
 
-    // Fallback: stdin/stderr if /dev/tty is not available.
     if std::io::stdin().is_terminal() {
-        eprint!("{}", prompt);
+        eprint!("{}", block);
         let _ = std::io::stderr().flush();
         let mut buf = String::new();
         if std::io::stdin().read_line(&mut buf).is_ok() {
@@ -131,8 +217,7 @@ pub fn confirm_continue(result: &ScanResult) -> bool {
         }
     }
 
-    // No TTY: block by default. Safe choice.
-    eprintln!("aur-guard :: no interactive TTY; blocking by default.");
+    eprintln!("\naur-guard :: no interactive TTY; blocking by default.");
     eprintln!(
         "             Set AUR_GUARD_ASSUME=yes only if you are absolutely sure you want to continue."
     );
@@ -140,6 +225,17 @@ pub fn confirm_continue(result: &ScanResult) -> bool {
         std::env::var("AUR_GUARD_ASSUME").as_deref(),
         Ok("yes" | "y" | "1")
     )
+}
+
+/// Convenience for the makepkg shim path — a single ScanResult prompt.
+pub fn confirm_build(result: &ScanResult) -> bool {
+    let summary = vec![format!(
+        "tier {}  (trust {}/100, {} finding(s))",
+        result.tier.label(),
+        result.score,
+        result.findings.len()
+    )];
+    confirm("decision required", &summary, "continue with this build?")
 }
 
 fn is_yes(input: &str) -> bool {

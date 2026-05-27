@@ -229,7 +229,7 @@ fn cmd_makepkg_wrap(real: PathBuf, args: Vec<String>) -> Result<ExitCode> {
         return exec_real(&real, &args);
     }
 
-    if !ui::confirm_continue(&result) {
+    if !ui::confirm_build(&result) {
         eprintln!("aur-guard :: install aborted by user.");
         return Ok(ExitCode::from(1));
     }
@@ -305,8 +305,8 @@ fn cmd_pacman_hook() -> Result<ExitCode> {
         }
     }
 
-    eprintln!(
-        "aur-guard :: {} AUR target(s) — trusted={} ok={} sketchy={} suspicious={} malicious={} (skipped {}).",
+    let summary_line = format!(
+        "{} AUR target(s) — trusted={} ok={} sketchy={} suspicious={} malicious={} (skipped {})",
         aur_targets.len(),
         tier_counts[0],
         tier_counts[1],
@@ -317,6 +317,8 @@ fn cmd_pacman_hook() -> Result<ExitCode> {
     );
 
     if worst_tier < Tier::Suspicious {
+        // No prompt needed; emit the summary as ambient info for journalctl.
+        eprintln!("aur-guard :: {summary_line}.");
         return Ok(ExitCode::from(0));
     }
 
@@ -337,6 +339,7 @@ fn cmd_pacman_hook() -> Result<ExitCode> {
                 .is_some()
         });
     if all_cached {
+        eprintln!("aur-guard :: {summary_line}.");
         eprintln!(
             "aur-guard :: {} concerning target(s) already accepted via the makepkg shim — skipping aggregate prompt.",
             suspicious_targets.len()
@@ -344,15 +347,13 @@ fn cmd_pacman_hook() -> Result<ExitCode> {
         return Ok(ExitCode::from(0));
     }
 
-    let synthetic = scanner::aggregate(
-        &scanned,
-        format!("{} AUR package(s)", scanned.len()),
-    );
+    let summary = vec![
+        summary_line.clone(),
+        format!("worst tier: {}", worst_tier.label()),
+    ];
 
-    if ui::confirm_continue(&synthetic) {
-        eprintln!("aur-guard :: continuing install at the user's discretion.");
-        // Cache the per-target verdicts so a subsequent identical run (e.g.
-        // user retrying a transaction) also short-circuits.
+    if ui::confirm("pre-transaction audit", &summary, "continue with install?") {
+        eprintln!("aur-guard :: {summary_line} — user confirmed.");
         for (name, r) in &scanned {
             if r.tier < Tier::Suspicious {
                 continue;
@@ -366,7 +367,7 @@ fn cmd_pacman_hook() -> Result<ExitCode> {
         }
         Ok(ExitCode::from(0))
     } else {
-        eprintln!("aur-guard :: install aborted by user (PreTransaction hook).");
+        eprintln!("aur-guard :: {summary_line} — user aborted.");
         Ok(ExitCode::from(1))
     }
 }

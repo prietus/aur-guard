@@ -1,5 +1,5 @@
 use crate::patterns::build_rules;
-use crate::report::{self, Finding, ScanResult, Tier};
+use crate::report::{self, Finding, ScanResult};
 use crate::rpc::MetaRule;
 use regex::Regex;
 use std::fs;
@@ -168,32 +168,6 @@ pub(crate) fn sort_findings(findings: &mut [Finding]) {
             .then(b.points.cmp(&a.points))
             .then(a.line.cmp(&b.line))
     });
-}
-
-/// Aggregate multiple per-package results into one synthetic ScanResult
-/// (used by the pacman hook prompt). Tier is the worst across inputs;
-/// score is the minimum trust observed.
-pub fn aggregate(results: &[(String, ScanResult)], label: String) -> ScanResult {
-    let findings: Vec<Finding> = results.iter().flat_map(|(_, r)| r.findings.clone()).collect();
-    let lines_scanned = results.iter().map(|(_, r)| r.lines_scanned).sum();
-    let tier = results
-        .iter()
-        .map(|(_, r)| r.tier)
-        .max()
-        .unwrap_or(Tier::Trusted);
-    let score = results.iter().map(|(_, r)| r.score).min().unwrap_or(100);
-    let gate = results.iter().find_map(|(_, r)| r.override_gate_fired);
-    let promoted = results.iter().find_map(|(_, r)| r.promoted_by_diff.clone());
-    ScanResult {
-        path: label,
-        findings,
-        lines_scanned,
-        score,
-        tier,
-        override_gate_fired: gate,
-        promoted_by_diff: promoted,
-        reputation: None,
-    }
 }
 
 fn check_skip_checksums(content: &str) -> Vec<Finding> {
