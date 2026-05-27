@@ -1,4 +1,5 @@
 mod diff;
+mod parent;
 mod patterns;
 mod report;
 mod rpc;
@@ -196,19 +197,31 @@ fn cmd_makepkg_wrap(real: PathBuf, args: Vec<String>) -> Result<ExitCode> {
     }
 
     // Verdict cache short-circuit: if this exact bundle (PKGBUILD + every
-    // adjacent .install) was scanned and accepted in the last 5 minutes,
-    // skip the prompt. yay/paru call makepkg three or four times per
-    // install, and re-prompting the user every single time turns into pure
-    // noise.
+    // adjacent .install) was scanned in the last few minutes, the previous
+    // decision wins — accept or decline — and we skip the prompt. yay/paru
+    // call makepkg three or four times per install AND retry on abort, so
+    // re-prompting every time turns into pure noise either way.
     let bundle_hash = verdict_cache::bundle_hash(&pkgbuild);
     if let Some(hash) = &bundle_hash {
         if let Some(cached) = verdict_cache::load(hash) {
-            eprintln!(
-                "aur-guard :: identical PKGBUILD already accepted as {} {}s ago — skipping prompt.",
-                cached.tier.label(),
-                cached.age_secs()
-            );
-            return exec_real(&real, &args);
+            match cached.decision {
+                verdict_cache::Decision::Accepted => {
+                    eprintln!(
+                        "aur-guard :: identical PKGBUILD already accepted as {} {}s ago — skipping prompt.",
+                        cached.tier.label(),
+                        cached.age_secs()
+                    );
+                    return exec_real(&real, &args);
+                }
+                verdict_cache::Decision::Declined => {
+                    eprintln!(
+                        "aur-guard :: identical PKGBUILD already declined {}s ago — aborting without prompt.",
+                        cached.age_secs()
+                    );
+                    signal_aur_helper_parent();
+                    return Ok(ExitCode::from(1));
+                }
+            }
         }
     }
 
@@ -224,18 +237,22 @@ fn cmd_makepkg_wrap(real: PathBuf, args: Vec<String>) -> Result<ExitCode> {
             eprintln!("aur-guard :: tier SKETCHY; continuing without prompt.");
         }
         if let Some(hash) = &bundle_hash {
-            let _ = verdict_cache::save(hash, result.tier);
+            let _ = verdict_cache::save(hash, result.tier, verdict_cache::Decision::Accepted);
         }
         return exec_real(&real, &args);
     }
 
     if !ui::confirm_build(&result) {
         eprintln!("aur-guard :: install aborted by user.");
+        if let Some(hash) = &bundle_hash {
+            let _ = verdict_cache::save(hash, result.tier, verdict_cache::Decision::Declined);
+        }
+        signal_aur_helper_parent();
         return Ok(ExitCode::from(1));
     }
     eprintln!("aur-guard :: user confirmed; continuing.");
     if let Some(hash) = &bundle_hash {
-        let _ = verdict_cache::save(hash, result.tier);
+        let _ = verdict_cache::save(hash, result.tier, verdict_cache::Decision::Accepted);
     }
     exec_real(&real, &args)
 }
@@ -322,23 +339,40 @@ fn cmd_pacman_hook() -> Result<ExitCode> {
         return Ok(ExitCode::from(0));
     }
 
-    // Verdict-cache short-circuit: when EVERY suspicious-or-worse target was
-    // accepted via the makepkg shim within the last 5 minutes, the hook has
-    // nothing to add — re-prompting the same y/n at this stage is pure
-    // noise. We still log/show the scan output above for transparency.
+    // Verdict-cache short-circuit: look up each suspicious target's cached
+    // decision (set by the makepkg shim moments before). If ANY was
+    // declined, abort the whole transaction without prompting — the user
+    // already made the call. If ALL were accepted, skip the aggregate
+    // prompt. Otherwise prompt as usual.
     let suspicious_targets: Vec<&(String, ScanResult)> = scanned
         .iter()
         .filter(|(_, r)| r.tier >= Tier::Suspicious)
         .collect();
-    let all_cached = !suspicious_targets.is_empty()
-        && suspicious_targets.iter().all(|(name, _)| {
+    let cached: Vec<Option<verdict_cache::CachedVerdict>> = suspicious_targets
+        .iter()
+        .map(|(name, _)| {
             find_pkgbuild(name, &caches)
                 .as_deref()
                 .and_then(verdict_cache::bundle_hash)
                 .and_then(|h| verdict_cache::load(&h))
-                .is_some()
-        });
-    if all_cached {
+        })
+        .collect();
+    let any_declined = cached
+        .iter()
+        .any(|c| matches!(c, Some(v) if v.decision == verdict_cache::Decision::Declined));
+    let all_accepted = !suspicious_targets.is_empty()
+        && cached
+            .iter()
+            .all(|c| matches!(c, Some(v) if v.decision == verdict_cache::Decision::Accepted));
+
+    if any_declined {
+        eprintln!("aur-guard :: {summary_line}.");
+        eprintln!(
+            "aur-guard :: at least one target was declined via the makepkg shim — aborting transaction."
+        );
+        return Ok(ExitCode::from(1));
+    }
+    if all_accepted {
         eprintln!("aur-guard :: {summary_line}.");
         eprintln!(
             "aur-guard :: {} concerning target(s) already accepted via the makepkg shim — skipping aggregate prompt.",
@@ -362,13 +396,41 @@ fn cmd_pacman_hook() -> Result<ExitCode> {
                 .as_deref()
                 .and_then(verdict_cache::bundle_hash)
             {
-                let _ = verdict_cache::save(&hash, r.tier);
+                let _ = verdict_cache::save(&hash, r.tier, verdict_cache::Decision::Accepted);
             }
         }
         Ok(ExitCode::from(0))
     } else {
         eprintln!("aur-guard :: {summary_line} — user aborted.");
+        for (name, r) in &scanned {
+            if r.tier < Tier::Suspicious {
+                continue;
+            }
+            if let Some(hash) = find_pkgbuild(name, &caches)
+                .as_deref()
+                .and_then(verdict_cache::bundle_hash)
+            {
+                let _ = verdict_cache::save(&hash, r.tier, verdict_cache::Decision::Declined);
+            }
+        }
         Ok(ExitCode::from(1))
+    }
+}
+
+/// Only safe inside `cmd_makepkg_wrap`'s decline paths: the parent in
+/// that context is the AUR helper that invoked us (we confirm via
+/// `parent_is_aur_helper` before signalling). The pacman hook path
+/// intentionally does NOT call this — the parent there is pacman, and
+/// SIGINT'ing pacman mid-transaction is asking for trouble (exit 1
+/// already tells pacman to abort cleanly).
+fn signal_aur_helper_parent() {
+    if let Some(comm) = parent::parent_comm() {
+        if parent::parent_is_aur_helper() {
+            eprintln!(
+                "aur-guard :: signalling parent {comm} (SIGINT) to stop the install loop."
+            );
+            let _ = parent::interrupt_parent();
+        }
     }
 }
 

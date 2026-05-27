@@ -28,12 +28,47 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const TTL_SECS: u64 = 300;
+/// Accepted verdicts live for 5 minutes (covers yay's clone → verifysource
+/// → build → fakeroot loop plus the PreTransaction hook). Declined
+/// verdicts only need to outlive yay's same-session retry storm — 60s is
+/// enough for that without trapping a user who genuinely changed their
+/// mind.
+const TTL_ACCEPTED_SECS: u64 = 300;
+const TTL_DECLINED_SECS: u64 = 60;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decision {
+    Accepted,
+    Declined,
+}
+
+impl Decision {
+    fn as_str(self) -> &'static str {
+        match self {
+            Decision::Accepted => "accepted",
+            Decision::Declined => "declined",
+        }
+    }
+    fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "accepted" => Some(Decision::Accepted),
+            "declined" => Some(Decision::Declined),
+            _ => None,
+        }
+    }
+    fn ttl_secs(self) -> u64 {
+        match self {
+            Decision::Accepted => TTL_ACCEPTED_SECS,
+            Decision::Declined => TTL_DECLINED_SECS,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct CachedVerdict {
     pub tier: Tier,
     pub timestamp: u64,
+    pub decision: Decision,
 }
 
 impl CachedVerdict {
@@ -125,19 +160,30 @@ pub fn load(hash: &str) -> Option<CachedVerdict> {
     let mut lines = body.lines();
     let tier_str = lines.next()?;
     let ts: u64 = lines.next()?.parse().ok()?;
-    if current_unix().saturating_sub(ts) > TTL_SECS {
+    // Backward-compat with v0.1.5 cache files that didn't write a decision
+    // line: assume Accepted.
+    let decision = lines
+        .next()
+        .and_then(Decision::parse)
+        .unwrap_or(Decision::Accepted);
+    if current_unix().saturating_sub(ts) > decision.ttl_secs() {
         return None;
     }
     let tier = Tier::parse(tier_str)?;
-    Some(CachedVerdict { tier, timestamp: ts })
+    Some(CachedVerdict { tier, timestamp: ts, decision })
 }
 
-pub fn save(hash: &str, tier: Tier) -> io::Result<()> {
+pub fn save(hash: &str, tier: Tier, decision: Decision) -> io::Result<()> {
     let Some(path) = entry_path(hash) else { return Ok(()) };
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let body = format!("{}\n{}\n", tier.label().to_lowercase(), current_unix());
+    let body = format!(
+        "{}\n{}\n{}\n",
+        tier.label().to_lowercase(),
+        current_unix(),
+        decision.as_str(),
+    );
     fs::write(path, body)?;
     if let Some(dir) = cache_dir() {
         prune_expired(&dir);
@@ -147,7 +193,7 @@ pub fn save(hash: &str, tier: Tier) -> io::Result<()> {
 
 fn prune_expired(dir: &Path) {
     let Ok(rd) = fs::read_dir(dir) else { return };
-    let cutoff = TTL_SECS.saturating_mul(4);
+    let cutoff = TTL_ACCEPTED_SECS.saturating_mul(4);
     for entry in rd.flatten() {
         let Ok(meta) = entry.metadata() else { continue };
         let Ok(modified) = meta.modified() else { continue };

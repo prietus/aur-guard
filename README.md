@@ -202,15 +202,40 @@ times in a row.
 The makepkg shim and the pacman hook share a tiny cache at
 `~/.cache/aur-guard/verdicts/<sha256>.txt`, keyed by the SHA-256 of the
 **bundle** (PKGBUILD + every adjacent `*.install` + the running aur-guard
-version). When an identical bundle is scanned again within 5 minutes:
+version). Each entry records the tier, the timestamp and the decision
+(`accepted` or `declined`). When an identical bundle is scanned again:
 
-- the shim prints `aur-guard :: identical PKGBUILD already accepted as X
-  Ys ago — skipping prompt` and exec's the real makepkg directly;
-- the hook prints a similar one-liner and skips the aggregate prompt.
+- a previously **accepted** decision (TTL 5 min) makes the shim print
+  `aur-guard :: identical PKGBUILD already accepted as X Ys ago — skipping
+  prompt` and exec the real makepkg directly; the hook prints a similar
+  one-liner and skips its aggregate prompt;
+- a previously **declined** decision (TTL 60 s) makes the shim print
+  `aur-guard :: identical PKGBUILD already declined Xs ago — aborting
+  without prompt` and exit `1`; the hook does the same.
 
-The verdict is only cached after an accepted scan (either user-confirmed
-or below the prompt threshold). Aborted scans are not cached, so a `n` at
-the prompt is repeated until you change the PKGBUILD.
+The shorter TTL on declines exists exactly to cover yay/paru's
+same-session retry loop: when you say `N`, yay typically calls makepkg
+again two or three times within seconds, and you would have to type `N`
+on every retry. With the decline cache you say `N` once and the next
+retries auto-abort silently. After 60 seconds the entry expires and a
+fresh `yay -S foo` re-prompts normally.
+
+#### Signalling the AUR helper on decline
+
+Even with the decline cache, yay/paru would still retry makepkg several
+times and then prompt for repo-only deps — exit codes alone don't tell
+the helper "the user said no, stop the whole install". When the shim
+detects that its immediate parent process is a known AUR helper (`yay`,
+`paru`, `pikaur`, `trizen`, `aurutils`, `aurman`, `rua` — checked via
+`/proc/<ppid>/comm`), it sends the parent a `SIGINT` right after caching
+the declined verdict. That is exactly the signal Ctrl-C would deliver,
+and the helper handles it as "user wants out".
+
+The check is strict: if the parent is anything other than one of the
+known helpers (bash, sudo, a custom wrapper, a CI runner, …) no signal
+is sent. The pacman PreTransaction hook never signals — its parent is
+pacman and exit `1` is already the right way to abort a transaction at
+that layer.
 
 Any mutation of the PKGBUILD or any `.install` changes the hash, so an
 attacker cannot swap a scriptlet behind an already-confirmed PKGBUILD to
